@@ -579,14 +579,33 @@ class MarketTracker {
         
         // Always update if new market detected, otherwise respect interval
         const hasNewMarket = this.markets.size !== this.lastMarketCount;
-        if (!hasNewMarket && timeSinceLastDisplay < this.displayInterval) {
+        
+        // Force update if new market detected, or if enough time has passed
+        // Also force update if lastDisplayTime was reset to 0 (forced refresh)
+        const shouldUpdate = hasNewMarket || 
+                            timeSinceLastDisplay >= this.displayInterval || 
+                            this.lastDisplayTime === 0;
+        
+        if (!shouldUpdate) {
             return;
         }
         
+        // Update tracking variables
+        const previousMarketCount = this.lastMarketCount;
         this.lastDisplayTime = now;
         this.lastMarketCount = this.markets.size;
 
         if (this.markets.size === 0) {
+            // Show empty state if we had markets before but now have none
+            if (previousMarketCount > 0) {
+                console.clear();
+                console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+                console.log(chalk.cyan.bold('  📊 MARKET TRACKING SUMMARY'));
+                console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+                console.log('');
+                console.log(chalk.gray('  No active markets to display'));
+                console.log('');
+            }
             return;
         }
 
@@ -594,6 +613,9 @@ class MarketTracker {
         // Keep markets stable - only remove if they're actually closed
         // Fallback: if market hasn't been updated in 7 days, consider it stale/closed
         const STALE_MARKET_THRESHOLD = 7 * 24 * 60 * 60 * 1000; // 7 days in milliseconds
+        
+        // Track markets before filtering to detect changes
+        const marketsBeforeFilter = this.markets.size;
         
         const activeMarkets = Array.from(this.markets.values()).filter((m) => {
             // If market has an endDate and it has passed, consider it closed
@@ -622,7 +644,22 @@ class MarketTracker {
             }
         }
 
+        // Update market count after filtering
+        this.lastMarketCount = this.markets.size;
+
+        // Always display if we have active markets, even if count didn't change
+        // (markets might have been updated with new trades)
         if (activeMarkets.length === 0) {
+            // Only show empty state if we had markets before
+            if (marketsBeforeFilter > 0) {
+                console.clear();
+                console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+                console.log(chalk.cyan.bold('  📊 MARKET TRACKING SUMMARY'));
+                console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+                console.log('');
+                console.log(chalk.gray('  No active markets to display'));
+                console.log('');
+            }
             return;
         }
 
@@ -729,6 +766,13 @@ class MarketTracker {
 
         console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
         console.log(''); // Empty line at end
+    }
+
+    /**
+     * Force immediate display update on next call to displayStats()
+     */
+    forceDisplayUpdate(): void {
+        this.lastDisplayTime = 0;
     }
 
     /**
