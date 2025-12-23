@@ -132,6 +132,106 @@ class MarketTracker {
     }
 
     /**
+     * Extract time window from market name (e.g., "10:15-10:30" or "10:30-10:45")
+     */
+    private extractTimeWindow(marketName: string): string | null {
+        // Look for patterns like "10:15-10:30", "10:30-10:45", "10:15AM-10:30AM", "10:15 AM - 10:30 AM", etc.
+        // Also handle formats like "December 23, 10:15AM-10:30AM ET"
+        const timePatterns = [
+            /(\d{1,2}:\d{2}(?:\s*[AP]M)?)\s*[-–]\s*(\d{1,2}:\d{2}(?:\s*[AP]M)?)/i,
+            /(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/i, // Without AM/PM
+        ];
+        
+        for (const pattern of timePatterns) {
+            const match = marketName.match(pattern);
+            if (match) {
+                return `${match[1].trim()}-${match[2].trim()}`;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Get base market name without time window (e.g., "Bitcoin Up or Down" from "Bitcoin Up or Down - 10:15-10:30")
+     */
+    private getBaseMarketName(marketName: string): string {
+        const timeWindow = this.extractTimeWindow(marketName);
+        if (timeWindow) {
+            // Remove the time window part
+            return marketName.replace(new RegExp(`\\s*[-–]\\s*${timeWindow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i'), '').trim();
+        }
+        return marketName;
+    }
+
+    /**
+     * Remove previous time window markets when a new one starts
+     */
+    private removePreviousTimeWindow(newMarket: MarketStats): void {
+        const newTimeWindow = this.extractTimeWindow(newMarket.marketName);
+        if (!newTimeWindow) {
+            return; // Not a time-window market
+        }
+
+        const baseName = this.getBaseMarketName(newMarket.marketName);
+        
+        // Find markets with the same base name but different (earlier) time windows
+        const marketsToRemove: string[] = [];
+        
+        for (const [key, market] of this.markets.entries()) {
+            if (key === newMarket.marketKey) {
+                continue; // Don't remove the new market
+            }
+
+            const marketBaseName = this.getBaseMarketName(market.marketName);
+            if (marketBaseName === baseName) {
+                const marketTimeWindow = this.extractTimeWindow(market.marketName);
+                if (marketTimeWindow && marketTimeWindow !== newTimeWindow) {
+                    // Extract start times to compare
+                    const newStart = newTimeWindow.split(/[-–]/)[0].trim();
+                    const marketStart = marketTimeWindow.split(/[-–]/)[0].trim();
+                    
+                    // Parse times (handle formats like "10:15", "10:15AM", "10:15 AM", etc.)
+                    const parseTime = (timeStr: string): number | null => {
+                        try {
+                            const cleaned = timeStr.replace(/\s*[AP]M/i, '').trim();
+                            const parts = cleaned.split(':');
+                            if (parts.length !== 2) return null;
+                            
+                            let hours = parseInt(parts[0], 10);
+                            const minutes = parseInt(parts[1], 10);
+                            
+                            if (isNaN(hours) || isNaN(minutes)) return null;
+                            
+                            // Handle 12-hour format (if AM/PM was present, but we already removed it)
+                            // For now, assume 24-hour format or that hours are already correct
+                            return hours * 60 + minutes;
+                        } catch (e) {
+                            return null;
+                        }
+                    };
+
+                    const newStartMinutes = parseTime(newStart);
+                    const marketStartMinutes = parseTime(marketStart);
+                    
+                    // Only remove if we can successfully parse both times
+                    if (newStartMinutes !== null && marketStartMinutes !== null) {
+                        // Remove markets with earlier start times (previous time windows)
+                        // Also handle wrap-around (e.g., 11:45 -> 12:00, but 12:00 is later)
+                        if (marketStartMinutes < newStartMinutes) {
+                            marketsToRemove.push(key);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove the previous time window markets
+        for (const key of marketsToRemove) {
+            this.markets.delete(key);
+        }
+    }
+
+    /**
      * Determine if outcome is UP or DOWN
      */
     private isUpOutcome(activity: any): boolean {
@@ -200,6 +300,9 @@ class MarketTracker {
                 assetDown: !isUp ? activity.asset : undefined,
             };
             this.markets.set(marketKey, market);
+            
+            // Remove previous time window markets when a new one starts
+            this.removePreviousTimeWindow(market);
             
             // Force immediate display update for new markets
             if (isNewMarket) {
