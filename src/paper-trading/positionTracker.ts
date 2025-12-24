@@ -66,8 +66,15 @@ function extractMarketKey(market: BinaryMarket): string {
         return 'Unknown';
     }
 
-    // Check for 15-minute timeframe
-    const has15Min = /\b15\s*min|\b15min|updown.*?15|15.*?updown/i.test(searchText);
+    // Check for 15-minute timeframe - explicit text
+    const hasExplicit15Min = /\b15\s*min|\b15min|updown.*?15|15.*?updown/i.test(searchText);
+
+    // Check for 15-minute timeframe - time range pattern like "6:00AM-6:15AM"
+    // This identifies 15min markets by the colon format in times (e.g., 6:00AM, 10:30PM)
+    const hasTimeRange = /\d{1,2}:\d{2}\s*(?:am|pm)\s*[-–]\s*\d{1,2}:\d{2}\s*(?:am|pm)/i.test(searchText);
+
+    // 15min markets have either explicit "15min" OR a time range with colons
+    const is15Min = hasExplicit15Min || hasTimeRange;
 
     // Check for hourly timeframe (explicit)
     const hasHourly = /\b1\s*h|\b1\s*hour|\bhourly/i.test(searchText);
@@ -79,12 +86,11 @@ function extractMarketKey(market: BinaryMarket): string {
     const hasUpDown = /(?:up|down).*?(?:up|down)|updown/i.test(searchText);
     // Pattern like "6AM ET" or "7PM ET" (with spaces) OR "9am-et" (with hyphens in slug)
     const hasSingleTime = /\d{1,2}\s*(?:am|pm)\s*et/i.test(searchText) || /\d{1,2}(?:am|pm)-et/i.test(searchText);
-    const hasTimeRange = /\d{1,2}:\d{2}\s*(?:am|pm)\s*[-–]\s*\d{1,2}:\d{2}\s*(?:am|pm)/i.test(searchText); // Pattern like "6:00AM-6:15AM"
     const isHourlyPattern = hasUpDown && hasSingleTime && !hasTimeRange;
 
     const type = isBTC ? 'BTC' : 'ETH';
-    // Prioritize 15min, then hourly (explicit or pattern), otherwise generic
-    const timeframe = has15Min ? 'UpDown-15' : (hasHourly || isHourlyPattern) ? 'UpDown-1h' : '';
+    // Prioritize 15min (explicit or time range), then hourly (explicit or pattern), otherwise generic
+    const timeframe = is15Min ? 'UpDown-15' : (hasHourly || isHourlyPattern) ? 'UpDown-1h' : '';
 
     return timeframe ? `${type}-${timeframe}` : type;
 }

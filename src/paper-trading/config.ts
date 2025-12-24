@@ -143,10 +143,10 @@ export interface DualSideStrategyConfig {
  * Default configuration values
  */
 export const DEFAULT_CONFIG: DualSideStrategyConfig = {
-    startingCapital: 1000,          // $1000 paper trading capital
+    startingCapital: 5000,          // $5000 paper trading capital
 
     skewZones: {
-        neutralThreshold: 0.05,     // 45-55% is neutral
+        neutralThreshold: 0.03,     // 47-53% is neutral (more sensitive to skew)
         moderateThreshold: 0.25,    // 25-75% is moderate
     },
 
@@ -154,7 +154,7 @@ export const DEFAULT_CONFIG: DualSideStrategyConfig = {
         neutralAllocation: 0.50,    // 50/50 at neutral
         maxDominantAllocation: 0.95, // Max 95% dominant
         minMinorityAllocation: 0.05, // Always at least 5% minority
-        curveExponent: 1.5,         // Slightly curved (not linear)
+        curveExponent: 1.2,         // More aggressive tilt in mid-range
     },
 
     time: {
@@ -173,11 +173,11 @@ export const DEFAULT_CONFIG: DualSideStrategyConfig = {
     },
 
     safety: {
-        maxCapitalPerMarket: 100,   // Max $100 per market
+        maxCapitalPerMarket: 300,   // Max $300 per market (scale toward watched trader)
         minTradeSize: 0.50,         // Minimum $0.50 per trade
         maxTradeSize: 25,           // Max $25 per trade
 
-        maxActiveMarkets: 10,       // Max 10 concurrent markets
+        maxActiveMarkets: 4,        // Focus on up to 4 markets like watcher dashboard
         maxCapitalDeployedPercent: 0.80, // Max 80% of capital deployed
 
         minSecondsBetweenTrades: 3,     // 3 seconds between any trades (more frequent like target trader)
@@ -209,7 +209,7 @@ export const DEFAULT_CONFIG: DualSideStrategyConfig = {
     },
 
     priceUpdateInterval: 5 * 1000,   // Update prices every 5 seconds
-    decisionInterval: 10 * 1000,     // Make decisions every 10 seconds
+    decisionInterval: 1 * 1000,      // Make decisions every 1 second (match watcher cadence)
     displayInterval: 2 * 1000,       // Update display every 2 seconds
 
     logTrades: true,
