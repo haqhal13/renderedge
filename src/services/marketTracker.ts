@@ -69,13 +69,20 @@ class MarketTracker {
     private isDisplaying = false; // Lock to prevent concurrent display updates
 
     constructor() {
-        // Initialize CSV file path in logs directory with run ID
+        // Initialize CSV file path in watcher folder with run ID
         const logsDir = path.join(process.cwd(), 'logs');
+        const watcherDir = path.join(logsDir, 'watcher');
+        
+        // Create directories
         if (!fs.existsSync(logsDir)) {
             fs.mkdirSync(logsDir, { recursive: true });
         }
+        if (!fs.existsSync(watcherDir)) {
+            fs.mkdirSync(watcherDir, { recursive: true });
+        }
+        
         const runId = getRunId();
-        this.csvFilePath = path.join(logsDir, `watcher_market_pnl_${runId}.csv`);
+        this.csvFilePath = path.join(watcherDir, `Watcher Market PNL_${runId}.csv`);
         this.initializeCsvFile();
     }
 
@@ -83,39 +90,44 @@ class MarketTracker {
      * Initialize CSV file with headers (always create new file for each run)
      */
     private initializeCsvFile(): void {
-        const headers = [
-            'Timestamp',
-            'Date',
-            'Year',
-            'Month',
-            'Day',
-            'Hour',
-            'Minute',
-            'Second',
-            'Millisecond',
-            'Market Key',
-            'Market Name',
-            'Condition ID',
-            'Invested Up ($)',
-            'Invested Down ($)',
-            'Total Invested ($)',
-            'Shares Up',
-            'Shares Down',
-            'Final Price Up ($)',
-            'Final Price Down ($)',
-            'Final Value Up ($)',
-            'Final Value Down ($)',
-            'Total Final Value ($)',
-            'PnL Up ($)',
-            'PnL Down ($)',
-            'Total PnL ($)',
-            'PnL Percent (%)',
-            'Trades Up',
-            'Trades Down',
-            'Outcome',
-            'Market Switch Reason'
-        ].join(',');
-        fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
+        try {
+            const headers = [
+                'Timestamp',
+                'Date',
+                'Year',
+                'Month',
+                'Day',
+                'Hour',
+                'Minute',
+                'Second',
+                'Millisecond',
+                'Market Key',
+                'Market Name',
+                'Condition ID',
+                'Invested Up ($)',
+                'Invested Down ($)',
+                'Total Invested ($)',
+                'Shares Up',
+                'Shares Down',
+                'Final Price Up ($)',
+                'Final Price Down ($)',
+                'Final Value Up ($)',
+                'Final Value Down ($)',
+                'Total Final Value ($)',
+                'PnL Up ($)',
+                'PnL Down ($)',
+                'Total PnL ($)',
+                'PnL Percent (%)',
+                'Trades Up',
+                'Trades Down',
+                'Outcome',
+                'Market Switch Reason'
+            ].join(',');
+            fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
+            console.log(`✓ Created CSV file: ${this.csvFilePath}`);
+        } catch (error) {
+            console.error(`✗ Failed to create CSV file ${this.csvFilePath}:`, error);
+        }
     }
 
     /**
@@ -1213,51 +1225,56 @@ class MarketTracker {
      */
     private async fetchCurrentPrices(market: MarketStats): Promise<void> {
         const now = Date.now();
-        // Only update prices every 10 seconds to avoid too many API calls
-        if (market.lastPriceUpdate && now - market.lastPriceUpdate < 10000) {
-            return;
-        }
 
-        try {
-            // Fetch prices from positions of tracked traders
-            // This gives us the most accurate current prices
-            for (const traderAddress of ENV.USER_ADDRESSES) {
-                try {
-                    const positions = await fetchData(
-                        `https://data-api.polymarket.com/positions?user=${traderAddress}`
-                    ).catch(() => null);
+        // Only fetch from API every 10 seconds to avoid too many API calls
+        const shouldFetchFromAPI = !market.lastPriceUpdate || (now - market.lastPriceUpdate >= 10000);
 
-                    if (Array.isArray(positions)) {
-                        for (const pos of positions) {
-                            // Match by asset ID
-                            if (market.assetUp && pos.asset === market.assetUp && pos.curPrice !== undefined) {
-                                market.currentPriceUp = parseFloat(pos.curPrice);
-                            }
-                            if (market.assetDown && pos.asset === market.assetDown && pos.curPrice !== undefined) {
-                                market.currentPriceDown = parseFloat(pos.curPrice);
+        if (shouldFetchFromAPI) {
+            try {
+                // Fetch prices from positions of tracked traders
+                // This gives us the most accurate current prices
+                for (const traderAddress of ENV.USER_ADDRESSES) {
+                    try {
+                        const positions = await fetchData(
+                            `https://data-api.polymarket.com/positions?user=${traderAddress}`
+                        ).catch(() => null);
+
+                        if (Array.isArray(positions)) {
+                            for (const pos of positions) {
+                                // Match by asset ID
+                                if (market.assetUp && pos.asset === market.assetUp && pos.curPrice !== undefined) {
+                                    market.currentPriceUp = parseFloat(pos.curPrice);
+                                }
+                                if (market.assetDown && pos.asset === market.assetDown && pos.curPrice !== undefined) {
+                                    market.currentPriceDown = parseFloat(pos.curPrice);
+                                }
                             }
                         }
+                    } catch (e) {
+                        // Continue to next trader
                     }
-                } catch (e) {
-                    // Continue to next trader
                 }
-            }
 
-            market.lastPriceUpdate = now;
-            
-            // Log prices to CSV if we have both UP and DOWN prices
-            if (market.currentPriceUp !== undefined && market.currentPriceDown !== undefined) {
-                // Extract market slug/title for price logger
-                const marketSlug = market.marketName || market.marketKey || '';
-                priceStreamLogger.logPrice(
-                    marketSlug,
-                    market.marketName,
-                    market.currentPriceUp,
-                    market.currentPriceDown
-                );
+                market.lastPriceUpdate = now;
+            } catch (e) {
+                // Silently fail - prices will be updated on next cycle
             }
-        } catch (e) {
-            // Silently fail - prices will be updated on next cycle
+        }
+
+        // Always log prices to CSV for live chart (every time this method is called)
+        // Use 0 as fallback if prices haven't been fetched yet
+        const priceUp = market.currentPriceUp ?? 0;
+        const priceDown = market.currentPriceDown ?? 0;
+
+        // Only log if we have actual prices (not both zero)
+        if (priceUp > 0 || priceDown > 0) {
+            const marketSlug = market.marketName || market.marketKey || '';
+            priceStreamLogger.logPrice(
+                marketSlug,
+                market.marketName,
+                priceUp,
+                priceDown
+            );
         }
     }
 

@@ -7,8 +7,15 @@
  *                 on the SAME markets as the target wallet
  */
 
+// CRITICAL: Initialize runId FIRST before any logger imports
+// This ensures all CSV files use the same run ID
+import { getRunId } from '../utils/runId';
+getRunId(); // Initialize runId immediately
+
 import chalk from 'chalk';
 import * as readline from 'readline';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
     BinaryMarket,
     PaperTrade,
@@ -23,8 +30,110 @@ import { MarketDataFetcher } from './marketDataFetcher';
 import { analyzePhase } from './sizingCurve';
 import fetchData from '../utils/fetchData';
 import { ENV } from '../config/env';
+// Now import loggers (they will use the runId that was just initialized)
 import marketTracker from '../services/marketTracker';
 import tradeLogger from '../services/tradeLogger';
+import priceStreamLogger from '../services/priceStreamLogger';
+
+// Force initialization of paper trading CSV files on import
+// This ensures they exist when the bot starts
+function initializePaperTradingCsvFiles(): void {
+    const runId = getRunId();
+    const logsDir = path.join(process.cwd(), 'logs');
+    const paperDir = path.join(logsDir, 'paper');
+
+    // Create directories
+    if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true });
+    }
+    if (!fs.existsSync(paperDir)) {
+        fs.mkdirSync(paperDir, { recursive: true });
+    }
+
+    // Paper trades CSV
+    const paperTradesPath = path.join(paperDir, `Paper Trades_${runId}.csv`);
+    if (!fs.existsSync(paperTradesPath)) {
+        const tradesHeaders = [
+            'Timestamp',
+            'Date',
+            'Year',
+            'Month',
+            'Day',
+            'Hour',
+            'Minute',
+            'Second',
+            'Millisecond',
+            'Trader Address',
+            'Trader Name',
+            'Transaction Hash',
+            'Condition ID',
+            'Market Name',
+            'Market Slug',
+            'Market Key',
+            'Side',
+            'Outcome',
+            'Outcome Index',
+            'Asset',
+            'Size (Shares)',
+            'Price Per Share ($)',
+            'Total Value ($)',
+            'Market Price UP ($)',
+            'Market Price DOWN ($)',
+            'Price Difference UP',
+            'Price Difference DOWN',
+            'Entry Type',
+            'Skew Magnitude',
+            'Dominant Side',
+            'Target Allocation',
+            'Reason',
+        ].join(',');
+        fs.writeFileSync(paperTradesPath, tradesHeaders + '\n', 'utf8');
+        console.log(`✓ Created CSV file: ${paperTradesPath}`);
+    }
+
+    // Paper trading PnL CSV
+    const paperPnlPath = path.join(paperDir, `Paper Market PNL_${runId}.csv`);
+    if (!fs.existsSync(paperPnlPath)) {
+        const pnlHeaders = [
+            'Timestamp',
+            'Date',
+            'Year',
+            'Month',
+            'Day',
+            'Hour',
+            'Minute',
+            'Second',
+            'Millisecond',
+            'Market Key',
+            'Market Name',
+            'Condition ID',
+            'Invested Up ($)',
+            'Invested Down ($)',
+            'Total Invested ($)',
+            'Shares Up',
+            'Shares Down',
+            'Final Price Up ($)',
+            'Final Price Down ($)',
+            'Final Value Up ($)',
+            'Final Value Down ($)',
+            'Total Final Value ($)',
+            'PnL Up ($)',
+            'PnL Down ($)',
+            'Total PnL ($)',
+            'PnL Percent (%)',
+            'Trades Up',
+            'Trades Down',
+            'Outcome',
+            'Market Switch Reason',
+            'Market Slug',
+        ].join(',');
+        fs.writeFileSync(paperPnlPath, pnlHeaders + '\n', 'utf8');
+        console.log(`✓ Created CSV file: ${paperPnlPath}`);
+    }
+}
+
+// Initialize CSV files immediately on module load
+initializePaperTradingCsvFiles();
 
 /**
  * Operating mode for the bot
@@ -158,6 +267,10 @@ export class PaperTradingBot {
         }
 
         console.clear();
+
+        // Display CSV files info on startup
+        this.displayCsvFilesInfo();
+
         console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
 
         if (this.mode === 'WATCH') {
@@ -165,6 +278,73 @@ export class PaperTradingBot {
         } else {
             await this.startPaperMode();
         }
+    }
+
+    /**
+     * Display CSV files info on startup
+     */
+    private displayCsvFilesInfo(): void {
+        const runId = getRunId();
+        const logsDir = path.join(process.cwd(), 'logs');
+        const livePricesDir = path.join(logsDir, 'Live prices');
+        const watcherDir = path.join(logsDir, 'watcher');
+        const paperDir = path.join(logsDir, 'paper');
+
+        // Ensure directories exist
+        [logsDir, livePricesDir, watcherDir, paperDir].forEach(dir => {
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+        });
+
+        // CSV files organized by folder
+        const csvFilesByCategory = {
+            'Live prices': {
+                dir: livePricesDir,
+                files: [
+                    { name: `BTC - 15 min prices_${runId}.csv`, desc: 'BTC 15min prices' },
+                    { name: `ETH - 15 min prices_${runId}.csv`, desc: 'ETH 15min prices' },
+                    { name: `BTC - 1 hour prices_${runId}.csv`, desc: 'BTC 1hr prices' },
+                    { name: `ETH - 1 hour prices_${runId}.csv`, desc: 'ETH 1hr prices' },
+                ],
+            },
+            'watcher': {
+                dir: watcherDir,
+                files: [
+                    { name: `Watcher Trades_${runId}.csv`, desc: 'Watcher trades' },
+                    { name: `Watcher Market PNL_${runId}.csv`, desc: 'Watcher market PnL' },
+                ],
+            },
+            'paper': {
+                dir: paperDir,
+                files: [
+                    { name: `Paper Trades_${runId}.csv`, desc: 'Paper trades' },
+                    { name: `Paper Market PNL_${runId}.csv`, desc: 'Paper market PnL' },
+                ],
+            },
+        };
+
+        console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+        console.log(chalk.cyan.bold('  📁 CSV LOGGING INITIALIZED'));
+        console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+        console.log('');
+        console.log(chalk.white(`  Run ID: ${runId}`));
+        console.log(chalk.white(`  Base Location: ${logsDir}`));
+        console.log('');
+
+        for (const [category, categoryData] of Object.entries(csvFilesByCategory)) {
+            console.log(chalk.yellow(`  📂 ${category}/:`));
+            for (const file of categoryData.files) {
+                const filePath = path.join(categoryData.dir, file.name);
+                const exists = fs.existsSync(filePath);
+                const status = exists ? chalk.green('✓') : chalk.gray('○');
+                console.log(chalk.gray(`    ${status} ${file.desc}: ${file.name}`));
+            }
+            console.log('');
+        }
+
+        console.log(chalk.gray('  Note: Price streams log entries when Watch/Paper mode trades'));
+        console.log('');
     }
 
     /**

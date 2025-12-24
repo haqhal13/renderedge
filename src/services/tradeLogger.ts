@@ -55,13 +55,20 @@ class TradeLogger {
     private loggedTrades: Set<string> = new Set(); // Track trades already logged
 
     constructor() {
-        // Initialize CSV file path in logs directory with run ID
+        // Initialize CSV file path in watcher folder with run ID
         const logsDir = path.join(process.cwd(), 'logs');
+        const watcherDir = path.join(logsDir, 'watcher');
+        
+        // Create directories
         if (!fs.existsSync(logsDir)) {
             fs.mkdirSync(logsDir, { recursive: true });
         }
+        if (!fs.existsSync(watcherDir)) {
+            fs.mkdirSync(watcherDir, { recursive: true });
+        }
+        
         const runId = getRunId();
-        this.csvFilePath = path.join(logsDir, `watcher_trades_${runId}.csv`);
+        this.csvFilePath = path.join(watcherDir, `Watcher Trades_${runId}.csv`);
         this.initializeCsvFile();
     }
 
@@ -69,37 +76,42 @@ class TradeLogger {
      * Initialize CSV file with headers (always create new file for each run)
      */
     private initializeCsvFile(): void {
-        const headers = [
-            'Timestamp',
-            'Date',
-            'Year',
-            'Month',
-            'Day',
-            'Hour',
-            'Minute',
-            'Second',
-            'Millisecond',
-            'Trader Address',
-            'Trader Name',
-            'Transaction Hash',
-            'Condition ID',
-            'Market Name',
-            'Market Slug',
-            'Market Key',
-            'Side',
-            'Outcome',
-            'Outcome Index',
-            'Asset',
-            'Size (Shares)',
-            'Price per Share ($)',
-            'Total Value ($)',
-            'Market Price UP ($)',
-            'Market Price DOWN ($)',
-            'Price Difference UP',
-            'Price Difference DOWN',
-            'Entry Type'
-        ].join(',');
-        fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
+        try {
+            const headers = [
+                'Timestamp',
+                'Date',
+                'Year',
+                'Month',
+                'Day',
+                'Hour',
+                'Minute',
+                'Second',
+                'Millisecond',
+                'Trader Address',
+                'Trader Name',
+                'Transaction Hash',
+                'Condition ID',
+                'Market Name',
+                'Market Slug',
+                'Market Key',
+                'Side',
+                'Outcome',
+                'Outcome Index',
+                'Asset',
+                'Size (Shares)',
+                'Price per Share ($)',
+                'Total Value ($)',
+                'Market Price UP ($)',
+                'Market Price DOWN ($)',
+                'Price Difference UP',
+                'Price Difference DOWN',
+                'Entry Type'
+            ].join(',');
+            fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
+            console.log(`✓ Created CSV file: ${this.csvFilePath}`);
+        } catch (error) {
+            console.error(`✗ Failed to create CSV file ${this.csvFilePath}:`, error);
+        }
     }
 
     /**
@@ -156,6 +168,7 @@ class TradeLogger {
                         priceUp = 1.0 - priceDown;
                     }
                     return { priceUp, priceDown };
+                }
                 }
             }
         } catch (error) {
@@ -343,44 +356,47 @@ class TradeLogger {
     }
 
     /**
-     * Extract market key from activity (similar to marketTracker logic)
+     * Extract market key from activity (matches priceStreamLogger logic)
      */
     private extractMarketKey(activity: any): string {
-        const rawTitle =
-            activity?.slug ||
-            activity?.eventSlug ||
-            activity?.title ||
-            activity?.asset ||
-            '';
-        
-        if (!rawTitle) return 'Unknown';
-        
-        const titleLower = rawTitle.toLowerCase();
-        
-        // Check for Bitcoin
-        if (titleLower.includes('bitcoin') || titleLower.includes('btc')) {
-            const has15Min = /\b15\s*min|\b15min/i.test(rawTitle);
-            const hasHourly = /\b1\s*h|\b1\s*hour|\bhourly/i.test(rawTitle);
-            if (has15Min) return 'BTC-UpDown-15';
-            if (hasHourly) return 'BTC-UpDown-1h';
-            return 'BTC';
+        const slug = activity?.slug || activity?.eventSlug || '';
+        const title = activity?.title || activity?.asset || '';
+        const searchText = `${slug} ${title}`.toLowerCase();
+
+        if (!searchText.trim()) return 'Unknown';
+
+        const isBTC = searchText.includes('bitcoin') || searchText.includes('btc');
+        const isETH = searchText.includes('ethereum') || searchText.includes('eth');
+
+        if (!isBTC && !isETH) {
+            // Use condition ID if available for non-BTC/ETH markets
+            if (activity.conditionId) {
+                return `CID-${activity.conditionId.substring(0, 10)}`;
+            }
+            return 'Unknown';
         }
-        
-        // Check for Ethereum
-        if (titleLower.includes('ethereum') || titleLower.includes('eth')) {
-            const has15Min = /\b15\s*min|\b15min/i.test(rawTitle);
-            const hasHourly = /\b1\s*h|\b1\s*hour|\bhourly/i.test(rawTitle);
-            if (has15Min) return 'ETH-UpDown-15';
-            if (hasHourly) return 'ETH-UpDown-1h';
-            return 'ETH';
-        }
-        
-        // Use condition ID if available
-        if (activity.conditionId) {
-            return `CID-${activity.conditionId.substring(0, 10)}`;
-        }
-        
-        return 'Unknown';
+
+        // Check for 15-minute timeframe
+        const has15Min = /\b15\s*min|\b15min|updown.*?15|15.*?updown/i.test(searchText);
+
+        // Check for hourly timeframe (explicit)
+        const hasHourly = /\b1\s*h|\b1\s*hour|\bhourly/i.test(searchText);
+
+        // Check for hourly markets by pattern: "Up or Down" with single time (e.g., "6AM ET") but NO time range
+        // Hourly markets: "Bitcoin Up or Down - December 24, 6AM ET" (single time, no range)
+        // 15min markets: "Bitcoin Up or Down - December 24, 6:00AM-6:15AM ET" (has time range with colon)
+        // Also handle slug format: "bitcoin-up-or-down-december-24-9am-et" (with hyphens)
+        const hasUpDown = /(?:up|down).*?(?:up|down)|updown/i.test(searchText);
+        // Pattern like "6AM ET" or "7PM ET" (with spaces) OR "9am-et" (with hyphens in slug)
+        const hasSingleTime = /\d{1,2}\s*(?:am|pm)\s*et/i.test(searchText) || /\d{1,2}(?:am|pm)-et/i.test(searchText);
+        const hasTimeRange = /\d{1,2}:\d{2}\s*(?:am|pm)\s*[-–]\s*\d{1,2}:\d{2}\s*(?:am|pm)/i.test(searchText); // Pattern like "6:00AM-6:15AM"
+        const isHourlyPattern = hasUpDown && hasSingleTime && !hasTimeRange;
+
+        const type = isBTC ? 'BTC' : 'ETH';
+        // Prioritize 15min, then hourly (explicit or pattern), otherwise generic
+        const timeframe = has15Min ? 'UpDown-15' : (hasHourly || isHourlyPattern) ? 'UpDown-1h' : '';
+
+        return timeframe ? `${type}-${timeframe}` : type;
     }
 }
 

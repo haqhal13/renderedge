@@ -46,38 +46,47 @@ function getTimestampBreakdown(timestamp: number): {
 }
 
 /**
- * Extract market key from market (similar to tradeLogger logic)
+ * Extract market key from market (matches priceStreamLogger logic)
  */
 function extractMarketKey(market: BinaryMarket): string {
-    const rawTitle = market.slug || market.title || '';
-    if (!rawTitle) return 'Unknown';
-    
-    const titleLower = rawTitle.toLowerCase();
-    
-    // Check for Bitcoin
-    if (titleLower.includes('bitcoin') || titleLower.includes('btc')) {
-        const has15Min = /\b15\s*min|\b15min/i.test(rawTitle);
-        const hasHourly = /\b1\s*h|\b1\s*hour|\bhourly/i.test(rawTitle);
-        if (has15Min) return 'BTC-UpDown-15';
-        if (hasHourly) return 'BTC-UpDown-1h';
-        return 'BTC';
+    const slug = market.slug || '';
+    const title = market.title || '';
+    const searchText = `${slug} ${title}`.toLowerCase();
+
+    if (!searchText.trim()) return 'Unknown';
+
+    const isBTC = searchText.includes('bitcoin') || searchText.includes('btc');
+    const isETH = searchText.includes('ethereum') || searchText.includes('eth');
+
+    if (!isBTC && !isETH) {
+        // Use condition ID if available for non-BTC/ETH markets
+        if (market.conditionId) {
+            return `CID-${market.conditionId.substring(0, 10)}`;
+        }
+        return 'Unknown';
     }
-    
-    // Check for Ethereum
-    if (titleLower.includes('ethereum') || titleLower.includes('eth')) {
-        const has15Min = /\b15\s*min|\b15min/i.test(rawTitle);
-        const hasHourly = /\b1\s*h|\b1\s*hour|\bhourly/i.test(rawTitle);
-        if (has15Min) return 'ETH-UpDown-15';
-        if (hasHourly) return 'ETH-UpDown-1h';
-        return 'ETH';
-    }
-    
-    // Use condition ID if available
-    if (market.conditionId) {
-        return `CID-${market.conditionId.substring(0, 10)}`;
-    }
-    
-    return 'Unknown';
+
+    // Check for 15-minute timeframe
+    const has15Min = /\b15\s*min|\b15min|updown.*?15|15.*?updown/i.test(searchText);
+
+    // Check for hourly timeframe (explicit)
+    const hasHourly = /\b1\s*h|\b1\s*hour|\bhourly/i.test(searchText);
+
+    // Check for hourly markets by pattern: "Up or Down" with single time (e.g., "6AM ET") but NO time range
+    // Hourly markets: "Bitcoin Up or Down - December 24, 6AM ET" (single time, no range)
+    // 15min markets: "Bitcoin Up or Down - December 24, 6:00AM-6:15AM ET" (has time range with colon)
+    // Also handle slug format: "bitcoin-up-or-down-december-24-9am-et" (with hyphens)
+    const hasUpDown = /(?:up|down).*?(?:up|down)|updown/i.test(searchText);
+    // Pattern like "6AM ET" or "7PM ET" (with spaces) OR "9am-et" (with hyphens in slug)
+    const hasSingleTime = /\d{1,2}\s*(?:am|pm)\s*et/i.test(searchText) || /\d{1,2}(?:am|pm)-et/i.test(searchText);
+    const hasTimeRange = /\d{1,2}:\d{2}\s*(?:am|pm)\s*[-–]\s*\d{1,2}:\d{2}\s*(?:am|pm)/i.test(searchText); // Pattern like "6:00AM-6:15AM"
+    const isHourlyPattern = hasUpDown && hasSingleTime && !hasTimeRange;
+
+    const type = isBTC ? 'BTC' : 'ETH';
+    // Prioritize 15min, then hourly (explicit or pattern), otherwise generic
+    const timeframe = has15Min ? 'UpDown-15' : (hasHourly || isHourlyPattern) ? 'UpDown-1h' : '';
+
+    return timeframe ? `${type}-${timeframe}` : type;
 }
 
 /**
@@ -108,14 +117,21 @@ export class PositionTracker {
         this.config = config;
         this.state = this.initializeState();
 
-        // Initialize logging paths with run ID
+        // Initialize logging paths in paper folder with run ID
         const logsDir = path.join(process.cwd(), 'logs');
+        const paperDir = path.join(logsDir, 'paper');
+        
+        // Create directories
         if (!fs.existsSync(logsDir)) {
             fs.mkdirSync(logsDir, { recursive: true });
         }
+        if (!fs.existsSync(paperDir)) {
+            fs.mkdirSync(paperDir, { recursive: true });
+        }
+        
         const runId = getRunId();
-        this.csvFilePath = path.join(logsDir, `paper_trading_pnl_${runId}.csv`);
-        this.tradesLogPath = path.join(logsDir, `paper_trades_${runId}.csv`);
+        this.csvFilePath = path.join(paperDir, `Paper Market PNL_${runId}.csv`);
+        this.tradesLogPath = path.join(paperDir, `Paper Trades_${runId}.csv`);
 
         this.initializeCsvFiles();
     }
@@ -177,74 +193,88 @@ export class PositionTracker {
      * Initialize CSV files with headers
      */
     private initializeCsvFiles(): void {
-        // P&L CSV - always create new file for each run
-        const headers = [
-                'Timestamp',
-                'Date',
-                'Year',
-                'Month',
-                'Day',
-                'Hour',
-                'Minute',
-                'Second',
-                'Millisecond',
-                'Market Slug',
-                'Market Name',
-                'Market Key',
-                'Condition ID',
-                'Invested Up ($)',
-                'Invested Down ($)',
-                'Total Invested ($)',
-                'Shares Up',
-                'Shares Down',
-                'Final Price Up ($)',
-                'Final Price Down ($)',
-                'Final Value Up ($)',
-                'Final Value Down ($)',
-                'Total Final Value ($)',
-                'PnL Up ($)',
-                'PnL Down ($)',
-                'Total PnL ($)',
-                'PnL Percent (%)',
-                'Winning Outcome',
-                'Trades Up',
-                'Trades Down',
-                'Market Switch Reason',
-            ].join(',');
-        fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
+        try {
+            // P&L CSV - always create new file for each run
+            // Format matches watcher_market_pnl CSV for easy comparison
+            const headers = [
+                    'Timestamp',
+                    'Date',
+                    'Year',
+                    'Month',
+                    'Day',
+                    'Hour',
+                    'Minute',
+                    'Second',
+                    'Millisecond',
+                    'Market Key',
+                    'Market Name',
+                    'Condition ID',
+                    'Invested Up ($)',
+                    'Invested Down ($)',
+                    'Total Invested ($)',
+                    'Shares Up',
+                    'Shares Down',
+                    'Final Price Up ($)',
+                    'Final Price Down ($)',
+                    'Final Value Up ($)',
+                    'Final Value Down ($)',
+                    'Total Final Value ($)',
+                    'PnL Up ($)',
+                    'PnL Down ($)',
+                    'Total PnL ($)',
+                    'PnL Percent (%)',
+                    'Trades Up',
+                    'Trades Down',
+                    'Outcome',
+                    'Market Switch Reason',
+                    // Paper-specific column
+                    'Market Slug',
+                ].join(',');
+            fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
+            console.log(`✓ Created CSV file: ${this.csvFilePath}`);
 
-        // Trades log CSV - always create new file for each run
-        const tradesHeaders = [
-                'Timestamp',
-                'Date',
-                'Year',
-                'Month',
-                'Day',
-                'Hour',
-                'Minute',
-                'Second',
-                'Millisecond',
-                'Market Slug',
-                'Market Name',
-                'Market Key',
-                'Condition ID',
-                'Side',
-                'Outcome',
-                'Outcome Index',
-                'Shares',
-                'Price Per Share ($)',
-                'Total Cost ($)',
-                'Market Price UP ($)',
-                'Market Price DOWN ($)',
-                'Price Difference UP',
-                'Price Difference DOWN',
-                'Skew Magnitude',
-                'Dominant Side',
-                'Target Allocation',
-                'Reason',
-                'Entry Type',
-            ].join(',');
-        fs.writeFileSync(this.tradesLogPath, tradesHeaders + '\n', 'utf8');
+            // Trades log CSV - always create new file for each run
+            // Format matches watcher_trades CSV for easy comparison
+            const tradesHeaders = [
+                    'Timestamp',
+                    'Date',
+                    'Year',
+                    'Month',
+                    'Day',
+                    'Hour',
+                    'Minute',
+                    'Second',
+                    'Millisecond',
+                    'Trader Address',      // N/A for paper trades (paper mode)
+                    'Trader Name',         // N/A for paper trades (paper mode)
+                    'Transaction Hash',    // N/A for paper trades (paper mode)
+                    'Condition ID',
+                    'Market Name',
+                    'Market Slug',
+                    'Market Key',
+                    'Side',
+                    'Outcome',
+                    'Outcome Index',
+                    'Asset',               // N/A for paper trades
+                    'Size (Shares)',
+                    'Price Per Share ($)',
+                    'Total Value ($)',
+                    'Market Price UP ($)',
+                    'Market Price DOWN ($)',
+                    'Price Difference UP',
+                    'Price Difference DOWN',
+                    'Entry Type',
+                    // Paper-specific columns (extra info)
+                    'Skew Magnitude',
+                    'Dominant Side',
+                    'Target Allocation',
+                    'Reason',
+                ].join(',');
+            fs.writeFileSync(this.tradesLogPath, tradesHeaders + '\n', 'utf8');
+            console.log(`✓ Created CSV file: ${this.tradesLogPath}`);
+        } catch (error) {
+            console.error(`✗ Failed to create paper trading CSV files:`, error);
+        }
     }
 
     /**
@@ -341,6 +371,7 @@ export class PositionTracker {
 
     /**
      * Log trade to CSV
+     * Format matches watcher_trades CSV for easy comparison
      */
     private logTrade(trade: PaperTrade): void {
         if (!this.config.csvLogging) return;
@@ -351,15 +382,16 @@ export class PositionTracker {
         const marketKey = market ? extractMarketKey(market) : 'Unknown';
         const outcome = trade.side;
         const outcomeIndex = trade.side === 'UP' ? 0 : 1;
-        
+
         // Get market prices at time of trade
         const priceUp = market?.priceUp ?? 0.5;
         const priceDown = market?.priceDown ?? 0.5;
-        
+
         // Calculate price differences
         const priceDifferenceUp = trade.side === 'UP' ? (trade.pricePerShare - priceUp) : 0;
         const priceDifferenceDown = trade.side === 'DOWN' ? (trade.pricePerShare - priceDown) : 0;
 
+        // Row format matches watcher_trades CSV headers
         const row = [
             trade.timestamp,
             new Date(trade.timestamp).toISOString(),
@@ -370,13 +402,17 @@ export class PositionTracker {
             timeBreakdown.minute,
             timeBreakdown.second,
             timeBreakdown.millisecond,
-            `"${trade.marketSlug}"`,
-            `"${trade.marketTitle.replace(/"/g, '""')}"`,
-            marketKey,
+            'PAPER_BOT',                              // Trader Address (N/A for paper)
+            'Paper Trading Bot',                      // Trader Name (N/A for paper)
+            '',                                       // Transaction Hash (N/A for paper)
             trade.conditionId,
+            `"${trade.marketTitle.replace(/"/g, '""')}"`,
+            trade.marketSlug,
+            marketKey,
             trade.side,
             outcome,
             outcomeIndex,
+            '',                                       // Asset (N/A for paper)
             trade.shares.toFixed(4),
             trade.pricePerShare.toFixed(4),
             trade.totalCost.toFixed(2),
@@ -384,11 +420,12 @@ export class PositionTracker {
             priceDown.toFixed(4),
             priceDifferenceUp.toFixed(4),
             priceDifferenceDown.toFixed(4),
+            'PAPER',                                  // Entry Type
+            // Paper-specific columns
             trade.skewAtTrade.skewMagnitude.toFixed(4),
             trade.skewAtTrade.dominantSide,
             `${(trade.allocationAtTrade.dominantSideRatio * 100).toFixed(0)}/${(trade.allocationAtTrade.minoritySideRatio * 100).toFixed(0)}`,
             `"${trade.reason.replace(/"/g, '""')}"`,
-            'PAPER', // Entry Type
         ].join(',');
 
         try {
@@ -510,6 +547,7 @@ export class PositionTracker {
 
     /**
      * Log resolved market to CSV
+     * Format matches watcher_market_pnl CSV for easy comparison
      */
     private logResolvedMarket(resolved: ResolvedMarket): void {
         if (!this.config.csvLogging) return;
@@ -524,6 +562,7 @@ export class PositionTracker {
         const pnlUp = finalValueUp - resolved.investedUp;
         const pnlDown = finalValueDown - resolved.investedDown;
 
+        // Row format matches watcher_market_pnl CSV headers
         const row = [
             resolved.resolutionTime,
             new Date(resolved.resolutionTime).toISOString(),
@@ -534,9 +573,8 @@ export class PositionTracker {
             timeBreakdown.minute,
             timeBreakdown.second,
             timeBreakdown.millisecond,
-            `"${resolved.market.slug}"`,
-            `"${resolved.market.title.replace(/"/g, '""')}"`,
             marketKey,
+            `"${resolved.market.title.replace(/"/g, '""')}"`,
             resolved.market.conditionId,
             resolved.investedUp.toFixed(2),
             resolved.investedDown.toFixed(2),
@@ -552,10 +590,12 @@ export class PositionTracker {
             pnlDown.toFixed(2),
             resolved.realizedPnL.toFixed(2),
             resolved.realizedPnLPercent.toFixed(2),
-            resolved.winningOutcome,
             resolved.position.positionUp.tradeCount,
             resolved.position.positionDown.tradeCount,
-            'Market Resolved', // Market Switch Reason
+            `${resolved.winningOutcome} Won`,  // Outcome format matches watcher (e.g., "UP Won")
+            'Market Resolved',                  // Market Switch Reason
+            // Paper-specific column
+            resolved.market.slug,               // Market Slug
         ].join(',');
 
         try {
