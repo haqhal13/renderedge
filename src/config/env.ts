@@ -1,21 +1,26 @@
 import * as dotenv from 'dotenv';
 import { CopyStrategy, CopyStrategyConfig, parseTieredMultipliers } from './copyStrategy';
-dotenv.config();
+// Note: dotenv.config() is now called in index.ts BEFORE this module is imported
+// This allows the interactive menu to set TRACK_ONLY_MODE before validation
+if (!process.env.DOTENV_LOADED) {
+    dotenv.config();
+    process.env.DOTENV_LOADED = 'true';
+}
 
 // Default trader to watch if USER_ADDRESSES isn't provided
 const DEFAULT_USER_ADDRESSES = '0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d';
 
-// Default network endpoints for read-only mode
+// Default network endpoints
 const DEFAULTS = {
     USER_ADDRESSES: DEFAULT_USER_ADDRESSES,
-    TRACK_ONLY_MODE: 'true',
     CLOB_HTTP_URL: 'https://clob.polymarket.com/',
     CLOB_WS_URL: 'wss://ws-subscriptions-clob.polymarket.com/ws',
     RPC_URL: 'https://polygon-rpc.com',
     USDC_CONTRACT_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
 };
 
-// Provide sensible defaults so the bot can start in watch-only mode without a .env
+// Provide sensible defaults so the bot can start without a .env
+// NOTE: We don't set TRACK_ONLY_MODE or PAPER_MODE as defaults - let the interactive menu handle it
 for (const [key, value] of Object.entries(DEFAULTS)) {
     if (!process.env[key]) {
         console.log(`ℹ️  ${key} not set; defaulting to ${value}`);
@@ -35,8 +40,9 @@ const isValidEthereumAddress = (address: string): boolean => {
  */
 const validateRequiredEnv = (): void => {
     const TRACK_ONLY_MODE = process.env.TRACK_ONLY_MODE === 'true';
+    const PAPER_MODE = process.env.PAPER_MODE === 'true';
     
-    // In track-only mode, PROXY_WALLET, PRIVATE_KEY, and MONGO_URI are optional
+    // In track-only mode or paper mode, PROXY_WALLET, PRIVATE_KEY, and MONGO_URI are optional
     const required = [
         'USER_ADDRESSES',
         'CLOB_HTTP_URL',
@@ -45,8 +51,8 @@ const validateRequiredEnv = (): void => {
         'USDC_CONTRACT_ADDRESS',
     ];
 
-    // Only require wallet credentials if not in track-only mode
-    if (!TRACK_ONLY_MODE) {
+    // Only require wallet credentials if not in track-only mode or paper mode
+    if (!TRACK_ONLY_MODE && !PAPER_MODE) {
         required.push('PROXY_WALLET', 'PRIVATE_KEY', 'MONGO_URI');
     }
 
@@ -385,6 +391,8 @@ export const ENV = {
     ), // 5 minutes default
     // Track-only mode (monitoring without executing trades)
     TRACK_ONLY_MODE: process.env.TRACK_ONLY_MODE === 'true',
+    // Paper trading mode (simulated trades without real execution)
+    PAPER_MODE: process.env.PAPER_MODE === 'true',
     // Dashboard display max age (minutes) for showing markets; fallback to TOO_OLD_TIMESTAMP hours
     DISPLAY_MAX_AGE_MINUTES: process.env.DISPLAY_MAX_AGE_MINUTES
         ? parseFloat(process.env.DISPLAY_MAX_AGE_MINUTES)

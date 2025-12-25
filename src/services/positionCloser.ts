@@ -77,7 +77,7 @@ const updatePolymarketCache = async (clobClient: ClobClient, tokenId: string): P
     try {
         await clobClient.getOrderBook(tokenId);
     } catch (error) {
-        Logger.warning(`⚠️  Failed to refresh balance cache for ${tokenId}:`, error);
+        Logger.warning(`⚠️  Failed to refresh balance cache for ${tokenId}: ${error}`);
     }
 };
 
@@ -164,7 +164,7 @@ const sellEntirePosition = async (
             }
         } catch (error) {
             attempts += 1;
-            Logger.warning(`   ⚠️  Sell attempt ${attempts}/${RETRY_LIMIT} threw error:`, error);
+            Logger.warning(`   ⚠️  Sell attempt ${attempts}/${RETRY_LIMIT} threw error: ${error}`);
         }
     }
 

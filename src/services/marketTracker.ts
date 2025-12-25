@@ -33,6 +33,7 @@ function getTimestampBreakdown(timestamp: number): {
 export interface MarketStats {
     marketKey: string; // e.g., "BTC-15min"
     marketName: string; // Full market name
+    marketSlug?: string; // Market slug (for CSV alignment with paper bot)
     sharesUp: number;
     sharesDown: number;
     investedUp: number;
@@ -51,6 +52,9 @@ export interface MarketStats {
     lastPriceUpdate?: number; // Timestamp of last price update
     marketOpenTime?: number; // Timestamp when this market was first opened
     category?: string; // Market category (e.g., "BTC-UpDown-15", "ETH-UpDown-15")
+    // Snapshot prices captured shortly before market end
+    closingPriceUp?: number;
+    closingPriceDown?: number;
 }
 
 class MarketTracker {
@@ -67,22 +71,26 @@ class MarketTracker {
     private processedTrades: Set<string> = new Set(); // Track processed trades to prevent double-counting
     private displayMode: 'WATCH' | 'TRADING' | 'PAPER' = 'TRADING'; // Display mode for header
     private isDisplaying = false; // Lock to prevent concurrent display updates
+    private priceUpdateInterval: NodeJS.Timeout | null = null; // Interval for frequent price updates
+    private lastPriceFetchTime = 0; // Track last price fetch time
 
     constructor() {
-        // Initialize CSV file path in watcher folder with run ID
+        // Initialize CSV file path - use paper folder if in PAPER mode, otherwise watcher folder
         const logsDir = path.join(process.cwd(), 'logs');
-        const watcherDir = path.join(logsDir, 'watcher');
+        const isPaperMode = ENV.PAPER_MODE;
+        const targetDir = path.join(logsDir, isPaperMode ? 'paper' : 'watcher');
+        const fileName = isPaperMode ? 'Paper Market PNL' : 'Watcher Market PNL';
         
         // Create directories
         if (!fs.existsSync(logsDir)) {
             fs.mkdirSync(logsDir, { recursive: true });
         }
-        if (!fs.existsSync(watcherDir)) {
-            fs.mkdirSync(watcherDir, { recursive: true });
+        if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
         }
         
         const runId = getRunId();
-        this.csvFilePath = path.join(watcherDir, `Watcher Market PNL_${runId}.csv`);
+        this.csvFilePath = path.join(targetDir, `${fileName}_${runId}.csv`);
         this.initializeCsvFile();
     }
 
@@ -121,7 +129,9 @@ class MarketTracker {
                 'Trades Up',
                 'Trades Down',
                 'Outcome',
-                'Market Switch Reason'
+                'Market Switch Reason',
+                // Paper-specific column kept for 1:1 CSV format
+                'Market Slug'
             ].join(',');
             fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
             console.log(`✓ Created CSV file: ${this.csvFilePath}`);
@@ -182,33 +192,45 @@ class MarketTracker {
             return;
         }
 
-        // Fetch final prices
+        // Fetch final prices (used as fallback if we don't have a closing snapshot)
         const finalPrices = await this.fetchFinalPrices(market);
 
         // Calculate final values and PnL
         const totalInvested = market.investedUp + market.investedDown;
+        const totalCostBasis = market.totalCostUp + market.totalCostDown; // Actual cost basis for PnL calculation
         
         let finalValueUp = 0;
         let finalValueDown = 0;
         let pnlUp = 0;
         let pnlDown = 0;
 
-        const finalPriceUp = finalPrices.priceUp ?? market.currentPriceUp ?? 0;
-        const finalPriceDown = finalPrices.priceDown ?? market.currentPriceDown ?? 0;
+        const finalPriceUp =
+            market.closingPriceUp ??
+            finalPrices.priceUp ??
+            market.currentPriceUp ??
+            0;
+        const finalPriceDown =
+            market.closingPriceDown ??
+            finalPrices.priceDown ??
+            market.currentPriceDown ??
+            0;
 
         if (market.sharesUp > 0 && finalPriceUp > 0) {
             finalValueUp = market.sharesUp * finalPriceUp;
-            pnlUp = finalValueUp - market.investedUp;
+            // Use totalCostUp (actual cost basis) for accurate PnL calculation (same as display)
+            pnlUp = finalValueUp - market.totalCostUp;
         }
 
         if (market.sharesDown > 0 && finalPriceDown > 0) {
             finalValueDown = market.sharesDown * finalPriceDown;
-            pnlDown = finalValueDown - market.investedDown;
+            // Use totalCostDown (actual cost basis) for accurate PnL calculation (same as display)
+            pnlDown = finalValueDown - market.totalCostDown;
         }
 
         const totalFinalValue = finalValueUp + finalValueDown;
         const totalPnl = pnlUp + pnlDown;
-        const pnlPercent = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
+        // Use cost basis (totalCostUp + totalCostDown) for accurate PnL percentage (same as display)
+        const pnlPercent = totalCostBasis > 0 ? (totalPnl / totalCostBasis) * 100 : 0;
 
         // Determine outcome
         let outcome = 'Unknown';
@@ -260,7 +282,8 @@ class MarketTracker {
             market.tradesUp,
             market.tradesDown,
             outcome,
-            'Market Closed' // Market Switch Reason
+            'Market Closed', // Market Switch Reason
+            market.marketSlug || '' // Market Slug
         ].join(',');
 
         // Append to CSV file
@@ -933,7 +956,7 @@ class MarketTracker {
      * This records PnL for a market at the time a new market opens
      */
     private async recordProfitAtNewMarketOpening(market: MarketStats, newMarket: MarketStats, isSwitching: boolean = false): Promise<void> {
-        // Fetch current prices at the time of new market opening
+        // Fetch current prices at the time of new market opening (used as fallback)
         const finalPrices = await this.fetchFinalPrices(market);
         
         const totalInvested = market.investedUp + market.investedDown;
@@ -943,27 +966,40 @@ class MarketTracker {
             return;
         }
         
+        const totalCostBasis = market.totalCostUp + market.totalCostDown; // Actual cost basis for PnL calculation
+        
         let finalValueUp = 0;
         let finalValueDown = 0;
         let pnlUp = 0;
         let pnlDown = 0;
 
-        const finalPriceUp = finalPrices.priceUp ?? market.currentPriceUp ?? 0;
-        const finalPriceDown = finalPrices.priceDown ?? market.currentPriceDown ?? 0;
+        const finalPriceUp =
+            market.closingPriceUp ??
+            finalPrices.priceUp ??
+            market.currentPriceUp ??
+            0;
+        const finalPriceDown =
+            market.closingPriceDown ??
+            finalPrices.priceDown ??
+            market.currentPriceDown ??
+            0;
 
         if (market.sharesUp > 0 && finalPriceUp > 0) {
             finalValueUp = market.sharesUp * finalPriceUp;
-            pnlUp = finalValueUp - market.investedUp;
+            // Use totalCostUp (actual cost basis) for accurate PnL calculation (same as display)
+            pnlUp = finalValueUp - market.totalCostUp;
         }
 
         if (market.sharesDown > 0 && finalPriceDown > 0) {
             finalValueDown = market.sharesDown * finalPriceDown;
-            pnlDown = finalValueDown - market.investedDown;
+            // Use totalCostDown (actual cost basis) for accurate PnL calculation (same as display)
+            pnlDown = finalValueDown - market.totalCostDown;
         }
 
         const totalFinalValue = finalValueUp + finalValueDown;
         const totalPnl = pnlUp + pnlDown;
-        const pnlPercent = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
+        // Use cost basis (totalCostUp + totalCostDown) for accurate PnL percentage (same as display)
+        const pnlPercent = totalCostBasis > 0 ? (totalPnl / totalCostBasis) * 100 : 0;
 
         // Determine outcome
         let outcome = 'Unknown';
@@ -1129,6 +1165,7 @@ class MarketTracker {
             market = {
                 marketKey,
                 marketName: activity.title || activity.slug || marketKey,
+                marketSlug: activity.slug || activity.eventSlug || '',
                 sharesUp: 0,
                 sharesDown: 0,
                 investedUp: 0,
@@ -1195,8 +1232,13 @@ class MarketTracker {
         const price = parseFloat(activity.price || '0');
         const cost = shares * price; // Total cost for this trade
 
+        // CRITICAL: In PAPER mode, only track positions for paper trades (transactionHash starts with "paper-")
+        // Watcher trades should only discover markets, not add positions
+        const isPaperTrade = activity.transactionHash && activity.transactionHash.startsWith('paper-');
+        const shouldTrackPosition = this.displayMode !== 'PAPER' || isPaperTrade;
+
         // Only accumulate on BUY; SELL just registers market presence
-        if (side === 'BUY') {
+        if (side === 'BUY' && shouldTrackPosition) {
             if (isUp) {
                 market.sharesUp += shares;
                 market.investedUp += invested;
@@ -1212,7 +1254,7 @@ class MarketTracker {
             // Mark this trade as processed to prevent double-counting
             this.processedTrades.add(tradeId);
         } else {
-            // For SELL trades, also mark as processed but don't count
+            // For SELL trades or watcher trades in PAPER mode, mark as processed but don't add positions
             this.processedTrades.add(tradeId);
         }
 
@@ -1220,55 +1262,119 @@ class MarketTracker {
     }
 
     /**
+     * Fetch order book prices from CLOB API (most accurate method)
+     */
+    private async fetchOrderBookPrice(assetId: string): Promise<number | null> {
+        try {
+            const bookData = await fetchData(
+                `https://clob.polymarket.com/book?token_id=${assetId}`
+            ).catch(() => null);
+
+            if (bookData && bookData.bids && bookData.asks) {
+                const bids = bookData.bids;
+                const asks = bookData.asks;
+
+                if (bids.length > 0 && asks.length > 0) {
+                    // Get best bid (highest price) and best ask (lowest price)
+                    const bestBid = Math.max(...bids.map((b: any) => parseFloat(b.price || 0)));
+                    const bestAsk = Math.min(...asks.map((a: any) => parseFloat(a.price || 1)));
+
+                    if (bestBid > 0 && bestAsk > 0 && bestBid <= 1 && bestAsk <= 1) {
+                        // Use mid price (average of best bid and best ask) - most accurate
+                        return (bestBid + bestAsk) / 2;
+                    }
+                }
+            }
+        } catch (e) {
+            // Silently fail
+        }
+        return null;
+    }
+
+    /**
+     * Fetch current prices for market assets using order book (most accurate) with fallback to positions
+     */
+    private async fetchCurrentPricesFromAPI(market: MarketStats): Promise<void> {
+        try {
+            // Try order book prices first (most accurate) if we have asset IDs
+            if (market.assetUp && market.assetDown) {
+                const [priceUpFromBook, priceDownFromBook] = await Promise.all([
+                    this.fetchOrderBookPrice(market.assetUp),
+                    this.fetchOrderBookPrice(market.assetDown),
+                ]);
+
+                if (priceUpFromBook !== null && priceDownFromBook !== null) {
+                    // Normalize prices to ensure they sum to 1.0 (should already be close, but ensure accuracy)
+                    const total = priceUpFromBook + priceDownFromBook;
+                    if (total > 0 && Math.abs(total - 1.0) > 0.01) {
+                        market.currentPriceUp = priceUpFromBook / total;
+                        market.currentPriceDown = priceDownFromBook / total;
+                    } else {
+                        market.currentPriceUp = priceUpFromBook;
+                        market.currentPriceDown = priceDownFromBook;
+                    }
+                    market.lastPriceUpdate = Date.now();
+                    return; // Successfully got prices from order book
+                }
+            }
+
+            // Fallback: Fetch from positions of tracked traders
+            const positionPromises = ENV.USER_ADDRESSES.map(traderAddress =>
+                fetchData(`https://data-api.polymarket.com/positions?user=${traderAddress}`)
+                    .catch(() => null)
+            );
+
+            const results = await Promise.allSettled(positionPromises);
+
+            for (const result of results) {
+                if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+                    const positions = result.value;
+                    for (const pos of positions) {
+                        // Match by asset ID - fallback method
+                        if (market.assetUp && pos.asset === market.assetUp && pos.curPrice !== undefined && pos.curPrice !== null) {
+                            const price = parseFloat(pos.curPrice);
+                            if (!isNaN(price) && price > 0 && price <= 1) {
+                                market.currentPriceUp = price;
+                            }
+                        }
+                        if (market.assetDown && pos.asset === market.assetDown && pos.curPrice !== undefined && pos.curPrice !== null) {
+                            const price = parseFloat(pos.curPrice);
+                            if (!isNaN(price) && price > 0 && price <= 1) {
+                                market.currentPriceDown = price;
+                            }
+                        }
+                    }
+                }
+            }
+
+            market.lastPriceUpdate = Date.now();
+        } catch (e) {
+            // Silently fail - will retry on next update
+        }
+    }
+
+    /**
      * Fetch current prices for market assets
-     * Uses positions from tracked traders to get current prices
+     * This method is called frequently and uses cached prices when possible
      */
     private async fetchCurrentPrices(market: MarketStats): Promise<void> {
         const now = Date.now();
 
-        // Only fetch from API every 10 seconds to avoid too many API calls
-        const shouldFetchFromAPI = !market.lastPriceUpdate || (now - market.lastPriceUpdate >= 10000);
+        // Fetch from API every 1-2 seconds for live prices (aggressive but necessary for accuracy)
+        const shouldFetchFromAPI = !market.lastPriceUpdate || (now - market.lastPriceUpdate >= 1000);
 
         if (shouldFetchFromAPI) {
-            try {
-                // Fetch prices from positions of tracked traders
-                // This gives us the most accurate current prices
-                for (const traderAddress of ENV.USER_ADDRESSES) {
-                    try {
-                        const positions = await fetchData(
-                            `https://data-api.polymarket.com/positions?user=${traderAddress}`
-                        ).catch(() => null);
-
-                        if (Array.isArray(positions)) {
-                            for (const pos of positions) {
-                                // Match by asset ID
-                                if (market.assetUp && pos.asset === market.assetUp && pos.curPrice !== undefined) {
-                                    market.currentPriceUp = parseFloat(pos.curPrice);
-                                }
-                                if (market.assetDown && pos.asset === market.assetDown && pos.curPrice !== undefined) {
-                                    market.currentPriceDown = parseFloat(pos.curPrice);
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        // Continue to next trader
-                    }
-                }
-
-                market.lastPriceUpdate = now;
-            } catch (e) {
-                // Silently fail - prices will be updated on next cycle
-            }
+            await this.fetchCurrentPricesFromAPI(market);
         }
 
         // Always log prices to CSV for live chart (every time this method is called)
-        // Use 0 as fallback if prices haven't been fetched yet
+        // Use cached prices if available
         const priceUp = market.currentPriceUp ?? 0;
         const priceDown = market.currentPriceDown ?? 0;
 
         // Only log if we have actual prices (not both zero)
         if (priceUp > 0 || priceDown > 0) {
-            const marketSlug = market.marketName || market.marketKey || '';
+            const marketSlug = market.marketSlug || market.marketName || market.marketKey || '';
             priceStreamLogger.logPrice(
                 marketSlug,
                 market.marketName,
@@ -1401,6 +1507,21 @@ class MarketTracker {
         const pricePromises = activeMarkets.map(m => this.fetchCurrentPrices(m));
         await Promise.allSettled(pricePromises);
 
+        // Capture closing price snapshot shortly before market end
+        for (const m of activeMarkets) {
+            if (
+                m.endDate &&
+                now >= m.endDate - 5000 && // within last 5 seconds before scheduled end
+                m.closingPriceUp === undefined &&
+                m.closingPriceDown === undefined &&
+                m.currentPriceUp !== undefined &&
+                m.currentPriceDown !== undefined
+            ) {
+                m.closingPriceUp = m.currentPriceUp;
+                m.closingPriceDown = m.currentPriceDown;
+            }
+        }
+
         // Sort markets by total invested (descending) and limit to maxMarkets
         const sortedMarkets = activeMarkets
             .sort((a, b) => {
@@ -1426,7 +1547,30 @@ class MarketTracker {
         
         outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
         outputLines.push(chalk.cyan.bold(`  ${modeHeader} - TRADER MARKET TRACKING`));
-        if (ENV.USER_ADDRESSES.length > 0) {
+        
+        if (this.displayMode === 'PAPER') {
+            // Paper mode header - show paper trading info
+            // Calculate paper mode capital from tracked markets
+            const paperStartingCapital = parseFloat(process.env.PAPER_STARTING_CAPITAL || '1000.0');
+            // Calculate current capital and portfolio value from market positions
+            let paperCurrentCapital = paperStartingCapital;
+            let paperPortfolioValue = 0;
+            for (const market of sortedMarkets) {
+                const marketInvested = market.investedUp + market.investedDown;
+                paperCurrentCapital -= marketInvested; // Deduct invested amount
+                // Add current value to portfolio
+                if (market.currentPriceUp && market.sharesUp > 0) {
+                    paperPortfolioValue += market.sharesUp * market.currentPriceUp;
+                }
+                if (market.currentPriceDown && market.sharesDown > 0) {
+                    paperPortfolioValue += market.sharesDown * market.currentPriceDown;
+                }
+            }
+            paperCurrentCapital = Math.max(0, paperCurrentCapital); // Don't go negative
+            outputLines.push(chalk.gray(`  Strategy: Dual-side accumulation (independent trader)`));
+            outputLines.push(chalk.gray(`  Starting Capital: $${paperStartingCapital.toFixed(2)} | Available: $${paperCurrentCapital.toFixed(2)} | Portfolio: $${paperPortfolioValue.toFixed(2)}`));
+            outputLines.push(chalk.gray(`  Active Markets: ${sortedMarkets.length}/${this.maxMarkets} | Trading on same markets as watcher mode`));
+        } else if (ENV.USER_ADDRESSES.length > 0) {
             if (ENV.USER_ADDRESSES.length === 1) {
                 const addr = ENV.USER_ADDRESSES[0];
                 outputLines.push(chalk.gray(`  Watching: ${chalk.white(addr)}`));
@@ -1443,13 +1587,15 @@ class MarketTracker {
         outputLines.push(''); // Empty line
 
         // Calculate totals across all markets
-        let totalInvestedAll = 0;
+        let totalInvestedAll = 0; // For display (shows invested amount from USDC)
+        let totalCostBasisAll = 0; // For accurate PnL calculation (actual cost basis)
         let totalValueAll = 0;
         let totalPnlAll = 0;
         let totalTradesAll = 0;
 
         for (const market of sortedMarkets) {
             const totalInvested = market.investedUp + market.investedDown;
+            const totalCostBasis = market.totalCostUp + market.totalCostDown;
             const upPercent = totalInvested > 0 ? (market.investedUp / totalInvested) * 100 : 0;
             const downPercent = totalInvested > 0 ? (market.investedDown / totalInvested) * 100 : 0;
 
@@ -1458,26 +1604,38 @@ class MarketTracker {
             const avgPriceDown = market.sharesDown > 0 ? market.totalCostDown / market.sharesDown : 0;
             
             // Calculate unrealized PnL
+            // Use totalCost (actual cost basis) instead of invested for accuracy
+            // Only calculate if we have valid prices (> 0) and shares
             let currentValueUp = 0;
             let currentValueDown = 0;
             let pnlUp = 0;
             let pnlDown = 0;
             let totalPnl = 0;
 
-            if (market.currentPriceUp !== undefined && market.sharesUp > 0) {
+            const hasValidPriceUp = market.currentPriceUp !== undefined && 
+                                   market.currentPriceUp > 0 && 
+                                   market.currentPriceUp <= 1;
+            const hasValidPriceDown = market.currentPriceDown !== undefined && 
+                                     market.currentPriceDown > 0 && 
+                                     market.currentPriceDown <= 1;
+
+            if (hasValidPriceUp && market.sharesUp > 0 && market.currentPriceUp !== undefined) {
                 currentValueUp = market.sharesUp * market.currentPriceUp;
-                pnlUp = currentValueUp - market.investedUp;
+                // Use totalCostUp (shares * avg price) as cost basis for accurate PnL
+                pnlUp = currentValueUp - market.totalCostUp;
             }
 
-            if (market.currentPriceDown !== undefined && market.sharesDown > 0) {
+            if (hasValidPriceDown && market.sharesDown > 0 && market.currentPriceDown !== undefined) {
                 currentValueDown = market.sharesDown * market.currentPriceDown;
-                pnlDown = currentValueDown - market.investedDown;
+                // Use totalCostDown (shares * avg price) as cost basis for accurate PnL
+                pnlDown = currentValueDown - market.totalCostDown;
             }
 
             totalPnl = pnlUp + pnlDown;
             
             // Accumulate totals
             totalInvestedAll += totalInvested;
+            totalCostBasisAll += totalCostBasis;
             totalValueAll += (currentValueUp + currentValueDown);
             totalPnlAll += totalPnl;
             totalTradesAll += (market.tradesUp + market.tradesDown);
@@ -1490,35 +1648,46 @@ class MarketTracker {
             outputLines.push(chalk.yellow.bold(`┌─ ${market.marketKey}`));
             outputLines.push(chalk.gray(`│  ${marketNameDisplay}`));
             
-            // UP line - compact
-            const upLine = `│  ${chalk.green('📈 UP')}: ${market.sharesUp.toFixed(2)} shares | $${market.investedUp.toFixed(2)} @ $${avgPriceUp.toFixed(4)}`;
-            if (market.currentPriceUp !== undefined) {
+            // UP line - with live prices prominently displayed
+            const upLine = `│  ${chalk.green('📈 UP')}: ${market.sharesUp.toFixed(2)} shares | $${market.investedUp.toFixed(2)} @ $${avgPriceUp.toFixed(4)} avg`;
+            if (hasValidPriceUp) {
                 const pnlColor = pnlUp >= 0 ? chalk.green : chalk.red;
                 const pnlSign = pnlUp >= 0 ? '+' : '';
-                const pnlPercent = market.investedUp > 0 ? ((pnlUp / market.investedUp) * 100).toFixed(1) : '0.0';
-                outputLines.push(`${upLine} | Now: $${market.currentPriceUp.toFixed(4)} | ${pnlColor(`${pnlSign}$${pnlUp.toFixed(2)} (${pnlPercent}%)`)} | ${market.tradesUp} trades`);
+                const pnlPercent = market.totalCostUp > 0 ? ((pnlUp / market.totalCostUp) * 100).toFixed(1) : '0.0';
+                // Display live price prominently
+                outputLines.push(`${upLine} | ${chalk.yellow.bold(`LIVE: $${market.currentPriceUp!.toFixed(4)}`)} | ${pnlColor(`${pnlSign}$${pnlUp.toFixed(2)} (${pnlPercent}%)`)} | ${market.tradesUp} trades`);
             } else {
-                outputLines.push(`${upLine} | ${market.tradesUp} trades`);
+                outputLines.push(`${upLine} | ${chalk.gray('LIVE: fetching...')} | ${market.tradesUp} trades`);
             }
             
-            // DOWN line - compact
-            const downLine = `│  ${chalk.red('📉 DOWN')}: ${market.sharesDown.toFixed(2)} shares | $${market.investedDown.toFixed(2)} @ $${avgPriceDown.toFixed(4)}`;
-            if (market.currentPriceDown !== undefined) {
+            // DOWN line - with live prices prominently displayed
+            const downLine = `│  ${chalk.red('📉 DOWN')}: ${market.sharesDown.toFixed(2)} shares | $${market.investedDown.toFixed(2)} @ $${avgPriceDown.toFixed(4)} avg`;
+            if (hasValidPriceDown) {
                 const pnlColor = pnlDown >= 0 ? chalk.green : chalk.red;
                 const pnlSign = pnlDown >= 0 ? '+' : '';
-                const pnlPercent = market.investedDown > 0 ? ((pnlDown / market.investedDown) * 100).toFixed(1) : '0.0';
-                outputLines.push(`${downLine} | Now: $${market.currentPriceDown.toFixed(4)} | ${pnlColor(`${pnlSign}$${pnlDown.toFixed(2)} (${pnlPercent}%)`)} | ${market.tradesDown} trades`);
+                const pnlPercent = market.totalCostDown > 0 ? ((pnlDown / market.totalCostDown) * 100).toFixed(1) : '0.0';
+                // Display live price prominently
+                outputLines.push(`${downLine} | ${chalk.yellow.bold(`LIVE: $${market.currentPriceDown!.toFixed(4)}`)} | ${pnlColor(`${pnlSign}$${pnlDown.toFixed(2)} (${pnlPercent}%)`)} | ${market.tradesDown} trades`);
             } else {
-                outputLines.push(`${downLine} | ${market.tradesDown} trades`);
+                outputLines.push(`${downLine} | ${chalk.gray('LIVE: fetching...')} | ${market.tradesDown} trades`);
+            }
+            
+            // Add live price summary line for easy comparison
+            if (hasValidPriceUp && hasValidPriceDown) {
+                const liveSum = market.currentPriceUp! + market.currentPriceDown!;
+                const sumColor = Math.abs(liveSum - 1.0) < 0.01 ? chalk.green : chalk.yellow;
+                outputLines.push(chalk.gray(`│  💵 Live Prices: UP $${market.currentPriceUp!.toFixed(4)} + DOWN $${market.currentPriceDown!.toFixed(4)} = ${sumColor(`$${liveSum.toFixed(4)}`)} (should be ~$1.00)`));
             }
             
             // Summary line - compact
             const totalCurrentValue = currentValueUp + currentValueDown;
             const totalPnlColor = totalPnl >= 0 ? chalk.green : chalk.red;
             const totalPnlSign = totalPnl >= 0 ? '+' : '';
-            const totalPnlPercent = totalInvested > 0 ? ((totalPnl / totalInvested) * 100).toFixed(1) : '0.0';
+            // Calculate total cost basis (more accurate than invested for PnL %)
+            const marketCostBasis = market.totalCostUp + market.totalCostDown;
+            const totalPnlPercent = marketCostBasis > 0 ? ((totalPnl / marketCostBasis) * 100).toFixed(1) : '0.0';
             
-            if (totalPnl !== 0 || (market.currentPriceUp !== undefined || market.currentPriceDown !== undefined)) {
+            if (totalPnl !== 0 || (hasValidPriceUp || hasValidPriceDown)) {
                 outputLines.push(chalk.cyan(`│  💰 Invested: $${totalInvested.toFixed(2)} | Value: $${totalCurrentValue.toFixed(2)} | ${totalPnlColor(`PnL: ${totalPnlSign}$${totalPnl.toFixed(2)} (${totalPnlPercent}%)`)}`));
             } else {
                 outputLines.push(chalk.cyan(`│  💰 Total Invested: $${totalInvested.toFixed(2)}`));
@@ -1540,9 +1709,11 @@ class MarketTracker {
         outputLines.push(chalk.yellow.bold('  📊 PORTFOLIO SUMMARY (All Markets)'));
         const totalPnlColor = totalPnlAll >= 0 ? chalk.green : chalk.red;
         const totalPnlSign = totalPnlAll >= 0 ? '+' : '';
-        const totalPnlPercent = totalInvestedAll > 0 ? ((totalPnlAll / totalInvestedAll) * 100).toFixed(2) : '0.00';
+        // Use cost basis for accurate PnL percentage calculation
+        const totalPnlPercent = totalCostBasisAll > 0 ? ((totalPnlAll / totalCostBasisAll) * 100).toFixed(2) : '0.00';
         
         outputLines.push(chalk.cyan(`  Total Invested: ${chalk.white(`$${totalInvestedAll.toFixed(2)}`)}`));
+        outputLines.push(chalk.cyan(`  Cost Basis:     ${chalk.white(`$${totalCostBasisAll.toFixed(2)}`)} ${chalk.gray('(actual cost)' )}`));
         outputLines.push(chalk.cyan(`  Current Value:  ${chalk.white(`$${totalValueAll.toFixed(2)}`)}`));
         outputLines.push(chalk.cyan(`  Total PnL:      ${totalPnlColor(`${totalPnlSign}$${totalPnlAll.toFixed(2)} (${totalPnlSign}${totalPnlPercent}%)`)}`));
         outputLines.push(chalk.cyan(`  Total Trades:   ${chalk.white(totalTradesAll.toString())}`));
@@ -1582,6 +1753,96 @@ class MarketTracker {
     }
 
     /**
+     * Get markets map (for external use)
+     */
+    getMarkets(): Map<string, MarketStats> {
+        return this.markets;
+    }
+
+    /**
+     * Get market stats by condition ID (used by paper bot to mirror watcher prices)
+     */
+    getMarketByConditionId(conditionId: string): MarketStats | undefined {
+        for (const market of this.markets.values()) {
+            if (market.conditionId === conditionId) {
+                return market;
+            }
+        }
+        return undefined;
+    }
+
+    /**
+     * Sync paper positions to marketTracker for display
+     * This allows paper mode to use the same dashboard as watcher mode
+     * Uses exact same PnL calculation as watcher mode
+     */
+    syncPaperPositions(paperPositions: Array<{
+        conditionId: string;
+        marketKey: string;
+        marketName: string;
+        marketSlug?: string;
+        sharesUp: number;
+        sharesDown: number;
+        costBasisUp: number;
+        costBasisDown: number;
+        avgPriceUp: number;
+        avgPriceDown: number;
+        tradesUp: number;
+        tradesDown: number;
+        endDate?: number;
+    }>, marketData: Map<string, {
+        conditionId: string;
+        priceUp: number;
+        priceDown: number;
+        assetUp?: string;
+        assetDown?: string;
+        endDate?: number;
+    }>): void {
+        // Clear existing markets and replace with paper positions
+        this.markets.clear();
+
+        for (const position of paperPositions) {
+            const marketInfo = marketData.get(position.marketKey);
+            if (!marketInfo) {
+                continue;
+            }
+
+            // Convert paper position to MarketStats format
+            // IMPORTANT: Use totalCostUp/totalCostDown for PnL calculation (same as watcher mode)
+            // In watcher mode: totalCostUp = shares * price (accumulated from trades)
+            // For paper mode: costBasisUp is already the total cost, but we calculate it as shares * avgPrice
+            // to match watcher mode's exact calculation
+            const totalCostUp = position.sharesUp > 0 ? position.sharesUp * position.avgPriceUp : 0;
+            const totalCostDown = position.sharesDown > 0 ? position.sharesDown * position.avgPriceDown : 0;
+
+            const market: MarketStats = {
+                marketKey: position.marketKey,
+                marketName: position.marketName,
+                marketSlug: position.marketSlug,
+                sharesUp: position.sharesUp,
+                sharesDown: position.sharesDown,
+                investedUp: position.costBasisUp, // For display (shows invested amount)
+                investedDown: position.costBasisDown, // For display
+                totalCostUp: totalCostUp, // For accurate PnL calculation (actual cost basis)
+                totalCostDown: totalCostDown, // For accurate PnL calculation (actual cost basis)
+                tradesUp: position.tradesUp,
+                tradesDown: position.tradesDown,
+                lastUpdate: Date.now(),
+                endDate: position.endDate || marketInfo.endDate,
+                conditionId: position.conditionId,
+                assetUp: marketInfo.assetUp,
+                assetDown: marketInfo.assetDown,
+                currentPriceUp: marketInfo.priceUp,
+                currentPriceDown: marketInfo.priceDown,
+                lastPriceUpdate: Date.now(),
+                marketOpenTime: Date.now(),
+            };
+
+            this.markets.set(position.marketKey, market);
+        }
+    }
+
+    /**
      * Clear all stats
      */
     clear(): void {
@@ -1590,4 +1851,3 @@ class MarketTracker {
 }
 
 export default new MarketTracker();
-

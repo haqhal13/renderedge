@@ -3,76 +3,165 @@
 import { getRunId } from './utils/runId';
 getRunId(); // Initialize runId immediately
 
-import connectDB, { closeDB } from './config/db';
-import { ENV } from './config/env';
-import createClobClient from './utils/createClobClient';
-import tradeExecutor, { stopTradeExecutor } from './services/tradeExecutor';
-import tradeMonitor, { stopTradeMonitor } from './services/tradeMonitor';
-import { closeMarketPositions } from './services/positionCloser';
-import Logger from './utils/logger';
-import { performHealthCheck, logHealthCheck } from './utils/healthCheck';
-import test from './test/test';
-// Now import loggers (they will use the runId that was just initialized)
-import marketTracker from './services/marketTracker';
-import './services/tradeLogger';
-import './services/priceStreamLogger';
+import * as readline from 'readline';
+import * as dotenv from 'dotenv';
 
-const USER_ADDRESSES = ENV.USER_ADDRESSES;
-const PROXY_WALLET = ENV.PROXY_WALLET;
+// Load .env file first (before any other imports that might use ENV)
+dotenv.config();
+
+// Show interactive menu BEFORE importing ENV (which validates and requires certain vars)
+// This allows us to set TRACK_ONLY_MODE before validation runs
+async function showModeMenu(): Promise<'PAPER' | 'WATCH' | 'TRADING'> {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
+
+    const question = (query: string): Promise<string> => {
+        return new Promise((resolve) => rl.question(query, resolve));
+    };
+
+    console.log('\n╔══════════════════════════════════════════════════════════════╗');
+    console.log('║           🚀 EDGEBOT - MODE SELECTION                        ║');
+    console.log('╚══════════════════════════════════════════════════════════════╝\n');
+    
+    console.log('Select mode:');
+    console.log('  1. 📊 Paper Mode - Independent paper trading (simulated)');
+    console.log('  2. 👀 Watcher Mode - Monitor trader activity (read-only)');
+    console.log('  3. 💰 Trading Mode - Real trading (executes trades)\n');
+
+    while (true) {
+        const choice = await question('Enter choice (1-3): ');
+        const trimmed = choice.trim();
+
+        if (trimmed === '1') {
+            process.env.PAPER_MODE = 'true';
+            process.env.TRACK_ONLY_MODE = 'false';
+            rl.close();
+            return 'PAPER';
+        } else if (trimmed === '2') {
+            process.env.PAPER_MODE = 'false';
+            process.env.TRACK_ONLY_MODE = 'true';
+            rl.close();
+            return 'WATCH';
+        } else if (trimmed === '3') {
+            process.env.PAPER_MODE = 'false';
+            process.env.TRACK_ONLY_MODE = 'false';
+            rl.close();
+            return 'TRADING';
+        } else {
+            console.log('❌ Invalid choice. Please enter 1, 2, or 3.\n');
+        }
+    }
+}
+
+// Don't import modules that use ENV at top level - import them dynamically in main() after menu
 
 // Graceful shutdown handler
 let isShuttingDown = false;
 
-const gracefulShutdown = async (signal: string) => {
-    if (isShuttingDown) {
-        Logger.warning('Shutdown already in progress, forcing exit...');
-        process.exit(1);
-    }
+// Graceful shutdown will be set up in main() after imports
+let gracefulShutdown: (signal: string) => Promise<void>;
 
-    isShuttingDown = true;
-    Logger.separator();
-    Logger.info(`Received ${signal}, initiating graceful shutdown...`);
-
-    try {
-        // Stop services
-        stopTradeMonitor();
-        stopTradeExecutor();
-
-        // Give services time to finish current operations
-        Logger.info('Waiting for services to finish current operations...');
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-
-        // Close database connection
-        await closeDB();
-
-        Logger.success('Graceful shutdown completed');
-        process.exit(0);
-    } catch (error) {
-        Logger.error(`Error during shutdown: ${error}`);
-        process.exit(1);
-    }
-};
-
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
-    Logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
-    // Don't exit immediately, let the application try to recover
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error: Error) => {
-    Logger.error(`Uncaught Exception: ${error.message}`);
-    // Exit immediately for uncaught exceptions as the application is in an undefined state
-    gracefulShutdown('uncaughtException').catch(() => {
-        process.exit(1);
-    });
-});
-
-// Handle termination signals
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+// Signal handlers will be set up in main() after imports
 
 export const main = async () => {
+    // Check if mode is explicitly set and show menu if not
+    const hasExplicitMode = 
+        (process.env.PAPER_MODE !== undefined && process.env.PAPER_MODE !== '') ||
+        (process.env.TRACK_ONLY_MODE !== undefined && process.env.TRACK_ONLY_MODE !== '');
+
+    const hasExplicitFlag = process.argv.some(arg => 
+        arg.includes('PAPER_MODE') || arg.includes('TRACK_ONLY_MODE')
+    );
+    
+    // Show menu if no mode is explicitly set
+    if (!hasExplicitMode && !hasExplicitFlag) {
+        const selectedMode = await showModeMenu();
+        console.log(`\n✅ Selected: ${selectedMode === 'PAPER' ? '📊 Paper Mode' : selectedMode === 'WATCH' ? '👀 Watcher Mode' : '💰 Trading Mode'}\n`);
+    }
+    
+    // NOW import all modules that use ENV (after menu has set TRACK_ONLY_MODE)
+    const envModule = await import('./config/env');
+    const ENV = envModule.ENV;
+    const dbModule = await import('./config/db');
+    const connectDB = dbModule.default;
+    const closeDB = dbModule.closeDB;
+    const createClobClientModule = await import('./utils/createClobClient');
+    const createClobClient = createClobClientModule.default;
+    const tradeExecutorModule = await import('./services/tradeExecutor');
+    const tradeExecutor = tradeExecutorModule.default;
+    const stopTradeExecutor = tradeExecutorModule.stopTradeExecutor;
+    const tradeMonitorModule = await import('./services/tradeMonitor');
+    const tradeMonitor = tradeMonitorModule.default;
+    const stopTradeMonitor = tradeMonitorModule.stopTradeMonitor;
+    const paperTradeMonitorModule = await import('./services/paperTradeMonitor');
+    const paperTradeMonitor = paperTradeMonitorModule.default;
+    const stopPaperTradeMonitor = paperTradeMonitorModule.stopPaperTradeMonitor;
+    const positionCloserModule = await import('./services/positionCloser');
+    const closeMarketPositions = positionCloserModule.closeMarketPositions;
+    const loggerModule = await import('./utils/logger');
+    const Logger = loggerModule.default;
+    const healthCheckModule = await import('./utils/healthCheck');
+    const performHealthCheck = healthCheckModule.performHealthCheck;
+    const logHealthCheck = healthCheckModule.logHealthCheck;
+    const marketTrackerModule = await import('./services/marketTracker');
+    const marketTracker = marketTrackerModule.default;
+    await import('./services/tradeLogger');
+    await import('./services/priceStreamLogger');
+    
+    const USER_ADDRESSES = ENV.USER_ADDRESSES;
+    const PROXY_WALLET = ENV.PROXY_WALLET;
+    
+    // Set up graceful shutdown now that we have the imports
+    gracefulShutdown = async (signal: string) => {
+        if (isShuttingDown) {
+            Logger.warning('Shutdown already in progress, forcing exit...');
+            process.exit(1);
+        }
+
+        isShuttingDown = true;
+        Logger.separator();
+        Logger.info(`Received ${signal}, initiating graceful shutdown...`);
+
+        try {
+            // Stop services
+            stopTradeMonitor();
+            stopPaperTradeMonitor();
+            stopTradeExecutor();
+
+            // Give services time to finish current operations
+            Logger.info('Waiting for services to finish current operations...');
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+
+            // Close database connection
+            await closeDB();
+
+            Logger.success('Graceful shutdown completed');
+            process.exit(0);
+        } catch (error) {
+            Logger.error(`Error during shutdown: ${error}`);
+            process.exit(1);
+        }
+    };
+    
+    // Set up signal handlers
+    process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+        Logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
+        // Don't exit immediately, let the application try to recover
+    });
+
+    process.on('uncaughtException', (error: Error) => {
+        Logger.error(`Uncaught Exception: ${error.message}`);
+        // Exit immediately for uncaught exceptions as the application is in an undefined state
+        gracefulShutdown('uncaughtException').catch(() => {
+            process.exit(1);
+        });
+    });
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    
     try {
         // Welcome message for first-time users
         const colors = {
@@ -102,7 +191,8 @@ export const main = async () => {
         // Set up market close callback for position closing
         let clobClientForClosing: Awaited<ReturnType<typeof createClobClient>> | null = null;
         
-        if (!ENV.TRACK_ONLY_MODE) {
+        // Only initialize CLOB client if we're in trading mode (not watcher or paper mode)
+        if (!ENV.TRACK_ONLY_MODE && !ENV.PAPER_MODE) {
             Logger.info('Initializing CLOB client...');
             clobClientForClosing = await createClobClient();
             Logger.success('CLOB client ready');
@@ -177,8 +267,8 @@ export const main = async () => {
 
         // Display by category/folder
         for (const [category, categoryData] of Object.entries(csvFilesByCategory)) {
-            // Skip paper trading files if in track-only mode
-            if (category === 'paper' && ENV.TRACK_ONLY_MODE) {
+            // Skip paper trading files if not in paper mode
+            if (category === 'paper' && !ENV.PAPER_MODE) {
                 continue;
             }
 
@@ -205,11 +295,25 @@ export const main = async () => {
         Logger.info('   Note: Price streams label Watch/Paper entries for cross-referencing');
         Logger.separator();
         
-        Logger.info('Starting trade monitor...');
-        tradeMonitor();
-
-        // Only start trade executor if not in track-only mode
-        if (ENV.TRACK_ONLY_MODE) {
+        // Determine which mode to run
+        if (ENV.PAPER_MODE) {
+            // Paper trading mode - discovers markets independently using same criteria as watcher
+            Logger.info('Starting paper trade monitor...');
+            Logger.separator();
+            Logger.info('📊 PAPER MODE ACTIVATED');
+            Logger.info('📊 Trading on same markets as watcher mode (discovered independently)');
+            Logger.info('📈 Shows real-time PnL, positions, and market statistics');
+            Logger.info('💾 Paper trades logged to logs/paper/Paper Trades_' + runId + '.csv');
+            Logger.info('💾 Paper PnL logged to logs/paper/Paper Market PNL_' + runId + '.csv');
+            Logger.info('💾 Prices logged to logs/Live prices/*_prices_' + runId + '.csv');
+            Logger.info('');
+            Logger.info('Paper trading: Independent strategy, trades on same market types as watcher');
+            Logger.separator();
+            paperTradeMonitor();
+        } else if (ENV.TRACK_ONLY_MODE) {
+            // Watch mode
+            Logger.info('Starting trade monitor...');
+            tradeMonitor();
             Logger.separator();
             Logger.info('👀 WATCH MODE ACTIVATED');
             Logger.info('📊 Dashboard will display trader activity on up to 4 markets');
@@ -221,6 +325,9 @@ export const main = async () => {
             Logger.info('Trade executor disabled - monitoring only, no execution');
             Logger.separator();
         } else {
+            // Real trading mode
+            Logger.info('Starting trade monitor...');
+            tradeMonitor();
             Logger.info('Starting trade executor...');
             tradeExecutor(clobClientForClosing!);
         }

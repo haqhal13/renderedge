@@ -55,20 +55,22 @@ class TradeLogger {
     private loggedTrades: Set<string> = new Set(); // Track trades already logged
 
     constructor() {
-        // Initialize CSV file path in watcher folder with run ID
+        // Initialize CSV file path - use paper folder if in PAPER mode, otherwise watcher folder
         const logsDir = path.join(process.cwd(), 'logs');
-        const watcherDir = path.join(logsDir, 'watcher');
+        const isPaperMode = ENV.PAPER_MODE;
+        const targetDir = path.join(logsDir, isPaperMode ? 'paper' : 'watcher');
+        const fileName = isPaperMode ? 'Paper Trades' : 'Watcher Trades';
         
         // Create directories
         if (!fs.existsSync(logsDir)) {
             fs.mkdirSync(logsDir, { recursive: true });
         }
-        if (!fs.existsSync(watcherDir)) {
-            fs.mkdirSync(watcherDir, { recursive: true });
+        if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
         }
         
         const runId = getRunId();
-        this.csvFilePath = path.join(watcherDir, `Watcher Trades_${runId}.csv`);
+        this.csvFilePath = path.join(targetDir, `${fileName}_${runId}.csv`);
         this.initializeCsvFile();
     }
 
@@ -105,7 +107,12 @@ class TradeLogger {
                 'Market Price DOWN ($)',
                 'Price Difference UP',
                 'Price Difference DOWN',
-                'Entry Type'
+                'Entry Type',
+                // Paper-specific columns (kept for 1:1 CSV format)
+                'Skew Magnitude',
+                'Dominant Side',
+                'Target Allocation',
+                'Reason'
             ].join(',');
             fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
             console.log(`✓ Created CSV file: ${this.csvFilePath}`);
@@ -334,22 +341,39 @@ class TradeLogger {
                 prices.priceDown.toFixed(4),
                 priceDifferenceUp.toFixed(4),
                 priceDifferenceDown.toFixed(4),
-                'WATCH' // Entry Type
+                traderAddress === 'PAPER' ? 'PAPER' : 'WATCH', // Entry Type
+                '', // Skew Magnitude (N/A for watcher bot)
+                '', // Dominant Side (N/A for watcher bot)
+                '', // Target Allocation (N/A for watcher bot)
+                ''  // Reason (N/A for watcher bot)
             ].join(',');
 
             // Append to CSV file
             fs.appendFileSync(this.csvFilePath, row + '\n', 'utf8');
             this.loggedTrades.add(tradeKey);
 
-            // Log to price stream with watch mode entry marker
+            // Log to price stream with appropriate entry marker (WATCH or PAPER)
             const marketTitle = activity.title || activity.slug || 'Unknown';
-            priceStreamLogger.markWatchEntry(
-                activity.slug || '',
-                marketTitle,
-                prices.priceUp,
-                prices.priceDown,
-                `Watch mode trade: ${outcome} ${size.toFixed(4)} shares @ $${tradePrice.toFixed(4)}`
-            );
+            const entryType = traderAddress === 'PAPER' ? 'PAPER' : 'WATCH';
+            const entryNotes = `${outcome} ${size.toFixed(4)} shares @ $${tradePrice.toFixed(4)}`;
+            
+            if (entryType === 'PAPER') {
+                priceStreamLogger.markPaperEntry(
+                    activity.slug || '',
+                    marketTitle,
+                    prices.priceUp,
+                    prices.priceDown,
+                    entryNotes
+                );
+            } else {
+                priceStreamLogger.markWatchEntry(
+                    activity.slug || '',
+                    marketTitle,
+                    prices.priceUp,
+                    prices.priceDown,
+                    entryNotes
+                );
+            }
         } catch (error) {
             console.error(`Failed to log trade to CSV: ${error}`);
         }
