@@ -47,19 +47,20 @@ const PAPER_ETH_MAX_PER_MARKET = parseFloat(process.env.PAPER_ETH_MAX_PER_MARKET
 
 // =============================================================================
 // THE SECRET SAUCE: WATCHER SIZES BY SHARES, NOT VALUE!
-// UPDATED from new data: Watcher avg 12.7 shares, median 12.0
-// Top share amounts: 5(10.1%), 28(9.7%), 16(9.3%), 2(6.7%), 1(5.8%)
-// Paper was too high (15.9 avg) - need more small share trades
+// Dec 26 DATA: Paper 43.8% trades under $2 vs Watcher 31.1%
+// Paper has too many tiny trades - reduce weights for 1,2 shares
+// Top share amounts: 5(10.2%), 16(9.9%), 1(8.3%), 2(7.4%), 28(7.0%)
 // =============================================================================
-const TARGET_SHARE_AMOUNTS = [5, 28, 16, 2, 1, 14, 10, 3, 22, 15, 6, 4, 8, 12, 7];
-const SHARE_WEIGHTS = [10.1, 9.7, 9.3, 6.7, 5.8, 5.0, 4.2, 3.7, 3.5, 3.4, 3.2, 3.1, 2.7, 2.6, 2.6];
+const TARGET_SHARE_AMOUNTS = [5, 16, 28, 1, 2, 14, 10, 3, 22, 15, 6, 4, 8, 12, 7];
+// ADJUSTED: Boost 5, 16, 28 weights; reduce 1, 2 weights to cut tiny trades
+const SHARE_WEIGHTS = [12.0, 11.0, 10.0, 5.0, 4.5, 5.5, 5.0, 4.0, 4.0, 4.0, 3.5, 3.5, 3.0, 3.0, 3.0];
 // Minimum shares for a trade (watcher does 1-share trades too)
 const MIN_SHARES = 0.5;
 
 // =============================================================================
-// TIMING PATTERNS (from NEW analysis)
-// Watcher: median 2s, avg 7.4s - 69% of gaps are 2-5s!
-// Paper was too slow (median 7s) - need MUCH more fast trades
+// TIMING PATTERNS (from Dec 26 analysis)
+// Watcher: 78.1% of gaps are 2-5s! Paper was only 42.9%
+// CRITICAL FIX: Increase fast trade percentage to match watcher
 // =============================================================================
 const BATCH_INTERVAL_MS = 2000;
 const BASE_GAP_MS = 2500;
@@ -213,6 +214,55 @@ async function getOrderBookPrice(assetId: string): Promise<number | null> {
 }
 
 /**
+ * Fetch market expiration time from Gamma API using conditionId
+ */
+async function fetchMarketExpiration(conditionId: string): Promise<number | null> {
+    if (!conditionId) {
+        return null;
+    }
+
+    try {
+        // Fetch from Gamma API - it has more reliable expiration data
+        const gammaUrl = `https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=500`;
+        const marketList = await fetchData(gammaUrl).catch(() => null);
+
+        if (Array.isArray(marketList)) {
+            const marketData = marketList.find((m: any) => m.condition_id === conditionId);
+            if (marketData) {
+                // Gamma API provides end_date_iso or endDate in various formats
+                if (marketData.end_date_iso) {
+                    const endDate = new Date(marketData.end_date_iso).getTime();
+                    if (endDate > 0) {
+                        return endDate;
+                    }
+                }
+                if (marketData.endDate) {
+                    // If it's a timestamp, check if it's in seconds or milliseconds
+                    const endDate = typeof marketData.endDate === 'number' 
+                        ? (marketData.endDate < 10000000000 ? marketData.endDate * 1000 : marketData.endDate)
+                        : new Date(marketData.endDate).getTime();
+                    if (endDate > 0) {
+                        return endDate;
+                    }
+                }
+                if (marketData.end_time) {
+                    const endDate = typeof marketData.end_time === 'number'
+                        ? (marketData.end_time < 10000000000 ? marketData.end_time * 1000 : marketData.end_time)
+                        : new Date(marketData.end_time).getTime();
+                    if (endDate > 0) {
+                        return endDate;
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        // Silent fail - don't break the bot if API call fails
+        debugLog(`fetchMarketExpiration failed for ${conditionId}: ${e}`);
+    }
+    return null;
+}
+
+/**
  * Get market key from title
  */
 function getMarketKey(title: string): string {
@@ -339,8 +389,28 @@ async function discoverMarketsFromWatchers(): Promise<void> {
             if (market.currentPriceDown) existing.priceDown = market.currentPriceDown;
             if (market.endDate) existing.endDate = market.endDate;
             existing.lastUpdate = now;
+            
+            // If endDate is missing or 0, try to fetch from Gamma API
+            if ((!existing.endDate || existing.endDate === 0) && market.conditionId) {
+                const fetchedEndDate = await fetchMarketExpiration(market.conditionId);
+                if (fetchedEndDate) {
+                    existing.endDate = fetchedEndDate;
+                    debugLog(`Updated endDate for ${existing.marketKey} from Gamma API: ${new Date(fetchedEndDate).toISOString()}`);
+                }
+            }
         } else {
             // New market from marketTracker
+            let endDate = market.endDate || 0;
+            
+            // If endDate is missing, try to fetch from Gamma API
+            if ((!endDate || endDate === 0) && market.conditionId) {
+                const fetchedEndDate = await fetchMarketExpiration(market.conditionId);
+                if (fetchedEndDate) {
+                    endDate = fetchedEndDate;
+                    debugLog(`Fetched endDate for ${market.marketKey} from Gamma API: ${new Date(fetchedEndDate).toISOString()}`);
+                }
+            }
+            
             const newMarket = {
                 conditionId: id,
                 marketKey: market.marketKey,
@@ -348,15 +418,21 @@ async function discoverMarketsFromWatchers(): Promise<void> {
                 marketSlug: market.marketSlug || '',
                 assetUp: market.assetUp || '',
                 assetDown: market.assetDown || '',
-                endDate: market.endDate || 0,
+                endDate: endDate,
                 priceUp: market.currentPriceUp || 0.5,
                 priceDown: market.currentPriceDown || 0.5,
                 lastUpdate: now,
             };
             discoveredMarkets.set(id, newMarket);
 
-            // Calculate time remaining
-            const timeLeftMin = newMarket.endDate ? Math.floor((newMarket.endDate - now) / 60000) : 0;
+            // Calculate time remaining - handle both seconds and milliseconds
+            let timeLeftMin = 0;
+            if (newMarket.endDate && newMarket.endDate > 0) {
+                // If endDate is less than 10000000000, it's likely in seconds, convert to ms
+                const endDateMs = newMarket.endDate < 10000000000 ? newMarket.endDate * 1000 : newMarket.endDate;
+                const timeDiff = endDateMs - now;
+                timeLeftMin = Math.max(0, Math.floor(timeDiff / 60000)); // Ensure non-negative
+            }
 
             debugLog(`✅ NEW MARKET DISCOVERED: ${market.marketKey}`);
             debugLog(`   ID: ${id}, assetUp: ${newMarket.assetUp || 'none'}, assetDown: ${newMarket.assetDown || 'none'}, endDate: ${newMarket.endDate ? new Date(newMarket.endDate).toISOString() : 'none'}`);
@@ -533,7 +609,9 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
 
     // Check time to expiration - stop building 2 min before expiration
     if (market.endDate && market.endDate > 0) {
-        const timeToExpiration = market.endDate - now;
+        // If endDate is less than 10000000000, it's likely in seconds, convert to ms
+        const endDateMs = market.endDate < 10000000000 ? market.endDate * 1000 : market.endDate;
+        const timeToExpiration = endDateMs - now;
         if (timeToExpiration < EXPIRATION_WINDOW_MS) {
             // Position building complete, finalize if we have any investment
             const buildState = buildingPositions.get(positionKey);
@@ -556,9 +634,10 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         const isBTC = market.marketKey.includes('BTC');
         const maxPerMarket = isBTC ? PAPER_BTC_MAX_PER_MARKET : PAPER_ETH_MAX_PER_MARKET;
 
-        // Use 50% of available capital per market to reach ~$2000/market target
-        // (watcher invests heavily in each market with ~380 trades/market)
-        const positionSize = Math.min(maxPerMarket, currentCapital * 0.50);
+        // Dec 26 DATA: Paper $774/market vs Watcher $2,324/market
+        // CRITICAL FIX: Increase from 50% to 70% of capital per market
+        // Watcher invests ~$2000-2400 per market with ~400 trades/market
+        const positionSize = Math.min(maxPerMarket, currentCapital * 0.70);
 
         if (positionSize < 10) { // Minimum $10 per position
             return;
@@ -820,17 +899,18 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
     }
 
     // Set next trade time based on watcher gap distribution
-    // NEW DATA: 69% are 2-5s, 13% are 5-10s, 10% are 10-20s, 7% are 20-60s
+    // Dec 26 DATA: Watcher 78.1% are 2-5s, Paper was only 42.9%
+    // CRITICAL FIX: Increase fast trade percentage to 80%
     const gapRoll = Math.random();
     let gap: number;
-    if (gapRoll < 0.69) {
-        gap = 2000 + Math.random() * 3000; // 2-5s (69%)
-    } else if (gapRoll < 0.82) {
-        gap = 5000 + Math.random() * 5000; // 5-10s (13%)
-    } else if (gapRoll < 0.92) {
-        gap = 10000 + Math.random() * 10000; // 10-20s (10%)
+    if (gapRoll < 0.80) {
+        gap = 2000 + Math.random() * 3000; // 2-5s (80% - matches watcher's 78%)
+    } else if (gapRoll < 0.88) {
+        gap = 5000 + Math.random() * 5000; // 5-10s (8%)
+    } else if (gapRoll < 0.94) {
+        gap = 10000 + Math.random() * 10000; // 10-20s (6%)
     } else {
-        gap = 20000 + Math.random() * 40000; // 20-60s (8%)
+        gap = 20000 + Math.random() * 40000; // 20-60s (6%)
     }
 
     buildState.lastTradeTime = now;
@@ -894,7 +974,9 @@ async function executeArbitrageTrade(position: MarketPosition, market: typeof di
     if (position.hasArbitragePosition || position.isSettled) return;
 
     const now = Date.now();
-    const timeToExpiration = position.endDate - now;
+    // If endDate is less than 10000000000, it's likely in seconds, convert to ms
+    const endDateMs = position.endDate < 10000000000 ? position.endDate * 1000 : position.endDate;
+    const timeToExpiration = endDateMs - now;
 
     // Only trade within the expiration window (1-2 min before end)
     if (timeToExpiration > EXPIRATION_WINDOW_MS || timeToExpiration < 10000) return;
@@ -1121,7 +1203,14 @@ function displayStatus(): void {
 
     for (const [id, m] of activeMarkets) {
         const hasAssets = m.assetUp && m.assetDown;
-        const timeLeft = m.endDate ? Math.floor((m.endDate - now) / 60000) : 0;
+        // Calculate time left - handle both seconds and milliseconds
+        let timeLeft = 0;
+        if (m.endDate && m.endDate > 0) {
+            // If endDate is less than 10000000000, it's likely in seconds, convert to ms
+            const endDateMs = m.endDate < 10000000000 ? m.endDate * 1000 : m.endDate;
+            const timeDiff = endDateMs - now;
+            timeLeft = Math.max(0, Math.floor(timeDiff / 60000)); // Ensure non-negative
+        }
         // Use conditionId (id) to look up position and build state
         const hasPosition = positions.has(id);
         const buildState = buildingPositions.get(id);
@@ -1269,7 +1358,13 @@ const paperTradeMonitor = async () => {
                 const isBuilding = buildingPositions.has(conditionId);
 
                 // Debug log every iteration to see what state each market is in
-                const timeLeft = market.endDate ? Math.floor((market.endDate - now) / 60000) : 0;
+                let timeLeft = 0;
+                if (market.endDate && market.endDate > 0) {
+                    // If endDate is less than 10000000000, it's likely in seconds, convert to ms
+                    const endDateMs = market.endDate < 10000000000 ? market.endDate * 1000 : market.endDate;
+                    const timeDiff = endDateMs - now;
+                    timeLeft = Math.max(0, Math.floor(timeDiff / 60000)); // Ensure non-negative
+                }
                 const hasAssets = market.assetUp && market.assetDown;
                 if (!hasAssets) {
                     debugLog(`  WAIT ${market.marketKey}: no assets yet (UP:${market.assetUp ? '✓' : '✗'} DOWN:${market.assetDown ? '✗' : '✗'})`);

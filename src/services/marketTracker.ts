@@ -1552,14 +1552,43 @@ class MarketTracker {
             }
         }
 
-        // Sort markets by total invested (descending) and limit to maxMarkets
-        const sortedMarkets = activeMarkets
-            .sort((a, b) => {
-                const totalA = a.investedUp + a.investedDown;
-                const totalB = b.investedUp + b.investedDown;
-                return totalB - totalA;
-            })
-            .slice(0, this.maxMarkets); // Only show top 4 markets
+        // Sort markets by total invested (descending)
+        // But ensure we show both 15m and 1h markets if they exist
+        const sortedByInvestment = activeMarkets.sort((a, b) => {
+            const totalA = a.investedUp + a.investedDown;
+            const totalB = b.investedUp + b.investedDown;
+            return totalB - totalA;
+        });
+        
+        // Separate markets by type
+        const markets15m = sortedByInvestment.filter(m => m.marketKey.includes('-15'));
+        const markets1h = sortedByInvestment.filter(m => m.marketKey.includes('-1h'));
+        const otherMarkets = sortedByInvestment.filter(m => !m.marketKey.includes('-15') && !m.marketKey.includes('-1h'));
+        
+        // Build display list: take top markets from each category
+        const sortedMarkets: MarketStats[] = [];
+        const maxPerCategory = Math.max(2, Math.floor(this.maxMarkets / 2)); // At least 2 per category if we have both
+        
+        // Add 15m markets (up to maxPerCategory)
+        sortedMarkets.push(...markets15m.slice(0, maxPerCategory));
+        
+        // Add 1h markets (up to maxPerCategory)
+        sortedMarkets.push(...markets1h.slice(0, maxPerCategory));
+        
+        // Add other markets to fill remaining slots
+        const remaining = this.maxMarkets - sortedMarkets.length;
+        if (remaining > 0) {
+            sortedMarkets.push(...otherMarkets.slice(0, remaining));
+        }
+        
+        // If we still have room, add more from the highest invested markets
+        if (sortedMarkets.length < this.maxMarkets) {
+            const alreadyIncluded = new Set(sortedMarkets.map(m => m.marketKey));
+            const additional = sortedByInvestment
+                .filter(m => !alreadyIncluded.has(m.marketKey))
+                .slice(0, this.maxMarkets - sortedMarkets.length);
+            sortedMarkets.push(...additional);
+        }
 
         // Build entire output as string first to prevent partial prints
         const outputLines: string[] = [];
@@ -1623,6 +1652,19 @@ class MarketTracker {
         let totalPnlAll = 0;
         let totalTradesAll = 0;
 
+        // Group totals by market type (15m vs 1h)
+        let totalInvested15m = 0;
+        let totalCostBasis15m = 0;
+        let totalValue15m = 0;
+        let totalPnl15m = 0;
+        let totalTrades15m = 0;
+
+        let totalInvested1h = 0;
+        let totalCostBasis1h = 0;
+        let totalValue1h = 0;
+        let totalPnl1h = 0;
+        let totalTrades1h = 0;
+
         for (const market of sortedMarkets) {
             const totalInvested = market.investedUp + market.investedDown;
             const totalCostBasis = market.totalCostUp + market.totalCostDown;
@@ -1663,12 +1705,31 @@ class MarketTracker {
 
             totalPnl = pnlUp + pnlDown;
             
-            // Accumulate totals
+            // Determine market type (15m or 1h)
+            const is15m = market.marketKey.includes('-15');
+            const is1h = market.marketKey.includes('-1h');
+            
+            // Accumulate totals for all markets
             totalInvestedAll += totalInvested;
             totalCostBasisAll += totalCostBasis;
             totalValueAll += (currentValueUp + currentValueDown);
             totalPnlAll += totalPnl;
             totalTradesAll += (market.tradesUp + market.tradesDown);
+            
+            // Accumulate by market type
+            if (is15m) {
+                totalInvested15m += totalInvested;
+                totalCostBasis15m += totalCostBasis;
+                totalValue15m += (currentValueUp + currentValueDown);
+                totalPnl15m += totalPnl;
+                totalTrades15m += (market.tradesUp + market.tradesDown);
+            } else if (is1h) {
+                totalInvested1h += totalInvested;
+                totalCostBasis1h += totalCostBasis;
+                totalValue1h += (currentValueUp + currentValueDown);
+                totalPnl1h += totalPnl;
+                totalTrades1h += (market.tradesUp + market.tradesDown);
+            }
             
             // Compact display format
             const marketNameDisplay = market.marketName.length > 50 
@@ -1734,19 +1795,47 @@ class MarketTracker {
             outputLines.push(''); // Empty line between markets
         }
 
-        // Display summary across all markets
+        // Display summary grouped by market type
         outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-        outputLines.push(chalk.yellow.bold('  📊 PORTFOLIO SUMMARY (All Markets)'));
+        outputLines.push(chalk.yellow.bold('  📊 PORTFOLIO SUMMARY'));
+        
+        // 15-minute markets summary (BTC-UpDown-15 + ETH-UpDown-15)
+        const pnl15mColor = totalPnl15m >= 0 ? chalk.green : chalk.red;
+        const pnl15mSign = totalPnl15m >= 0 ? '+' : '';
+        const pnl15mPercent = totalCostBasis15m > 0 ? ((totalPnl15m / totalCostBasis15m) * 100).toFixed(2) : '0.00';
+        
+        outputLines.push(chalk.yellow.bold('  ⏱️  15-Minute Markets (BTC + ETH)'));
+        outputLines.push(chalk.cyan(`    Total Invested: ${chalk.white(`$${totalInvested15m.toFixed(2)}`)}`));
+        outputLines.push(chalk.cyan(`    Cost Basis:     ${chalk.white(`$${totalCostBasis15m.toFixed(2)}`)} ${chalk.gray('(actual cost)' )}`));
+        outputLines.push(chalk.cyan(`    Current Value:  ${chalk.white(`$${totalValue15m.toFixed(2)}`)}`));
+        outputLines.push(chalk.cyan(`    Total PnL:      ${pnl15mColor(`${pnl15mSign}$${totalPnl15m.toFixed(2)} (${pnl15mSign}${pnl15mPercent}%)`)}`));
+        outputLines.push(chalk.cyan(`    Total Trades:   ${chalk.white(totalTrades15m.toString())}`));
+        outputLines.push('');
+        
+        // 1-hour markets summary (BTC-UpDown-1h + ETH-UpDown-1h)
+        const pnl1hColor = totalPnl1h >= 0 ? chalk.green : chalk.red;
+        const pnl1hSign = totalPnl1h >= 0 ? '+' : '';
+        const pnl1hPercent = totalCostBasis1h > 0 ? ((totalPnl1h / totalCostBasis1h) * 100).toFixed(2) : '0.00';
+        
+        outputLines.push(chalk.yellow.bold('  🕐 1-Hour Markets (BTC + ETH)'));
+        outputLines.push(chalk.cyan(`    Total Invested: ${chalk.white(`$${totalInvested1h.toFixed(2)}`)}`));
+        outputLines.push(chalk.cyan(`    Cost Basis:     ${chalk.white(`$${totalCostBasis1h.toFixed(2)}`)} ${chalk.gray('(actual cost)' )}`));
+        outputLines.push(chalk.cyan(`    Current Value:  ${chalk.white(`$${totalValue1h.toFixed(2)}`)}`));
+        outputLines.push(chalk.cyan(`    Total PnL:      ${pnl1hColor(`${pnl1hSign}$${totalPnl1h.toFixed(2)} (${pnl1hSign}${pnl1hPercent}%)`)}`));
+        outputLines.push(chalk.cyan(`    Total Trades:   ${chalk.white(totalTrades1h.toString())}`));
+        outputLines.push('');
+        
+        // Total summary (all markets combined)
         const totalPnlColor = totalPnlAll >= 0 ? chalk.green : chalk.red;
         const totalPnlSign = totalPnlAll >= 0 ? '+' : '';
-        // Use cost basis for accurate PnL percentage calculation
         const totalPnlPercent = totalCostBasisAll > 0 ? ((totalPnlAll / totalCostBasisAll) * 100).toFixed(2) : '0.00';
         
-        outputLines.push(chalk.cyan(`  Total Invested: ${chalk.white(`$${totalInvestedAll.toFixed(2)}`)}`));
-        outputLines.push(chalk.cyan(`  Cost Basis:     ${chalk.white(`$${totalCostBasisAll.toFixed(2)}`)} ${chalk.gray('(actual cost)' )}`));
-        outputLines.push(chalk.cyan(`  Current Value:  ${chalk.white(`$${totalValueAll.toFixed(2)}`)}`));
-        outputLines.push(chalk.cyan(`  Total PnL:      ${totalPnlColor(`${totalPnlSign}$${totalPnlAll.toFixed(2)} (${totalPnlSign}${totalPnlPercent}%)`)}`));
-        outputLines.push(chalk.cyan(`  Total Trades:   ${chalk.white(totalTradesAll.toString())}`));
+        outputLines.push(chalk.yellow.bold('  📈 TOTAL (All Markets)'));
+        outputLines.push(chalk.cyan(`    Total Invested: ${chalk.white(`$${totalInvestedAll.toFixed(2)}`)}`));
+        outputLines.push(chalk.cyan(`    Cost Basis:     ${chalk.white(`$${totalCostBasisAll.toFixed(2)}`)} ${chalk.gray('(actual cost)' )}`));
+        outputLines.push(chalk.cyan(`    Current Value:  ${chalk.white(`$${totalValueAll.toFixed(2)}`)}`));
+        outputLines.push(chalk.cyan(`    Total PnL:      ${totalPnlColor(`${totalPnlSign}$${totalPnlAll.toFixed(2)} (${totalPnlSign}${totalPnlPercent}%)`)}`));
+        outputLines.push(chalk.cyan(`    Total Trades:   ${chalk.white(totalTradesAll.toString())}`));
         outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
         outputLines.push(''); // Empty line at end
 
