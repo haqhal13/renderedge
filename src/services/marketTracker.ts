@@ -1140,12 +1140,37 @@ class MarketTracker {
             return; // Skip non-15min/hourly markets
         }
 
+        // ==========================================================================
+        // CRITICAL: For 15-min markets, verify this trade is for the CURRENT window!
+        // This prevents trades on OLD markets that haven't expired yet
+        // Same logic as paper mode for consistency
+        // ==========================================================================
+        const slug = activity.slug || activity.eventSlug || '';
+        const is15MinMarket = /updown-15m-|15\s*min/i.test(slug) ||
+                              (activity.title && /\d{1,2}:\d{2}\s*(?:am|pm)?\s*[-–]\s*\d{1,2}:\d{2}/i.test(activity.title));
+
+        if (is15MinMarket && slug) {
+            const slugTimestampMatch = slug.match(/updown-15m-(\d+)/);
+            if (slugTimestampMatch) {
+                const now = Date.now();
+                const marketStartTimestamp = parseInt(slugTimestampMatch[1], 10) * 1000;
+                const currentWindowStart = Math.floor(now / (15 * 60 * 1000)) * (15 * 60 * 1000);
+
+                // If this market's start time doesn't match current window, skip the trade
+                // but still allow the market to be displayed until it expires
+                if (marketStartTimestamp !== currentWindowStart) {
+                    // Skip trades for old windows - they should not accumulate new stats
+                    return;
+                }
+            }
+        }
+
         // Create unique trade identifier to prevent double-counting
         // Use transactionHash + asset + side as unique key
-        const tradeId = activity.transactionHash 
+        const tradeId = activity.transactionHash
             ? `${activity.transactionHash}:${activity.asset}:${activity.side || 'BUY'}`
             : `${activity.timestamp}:${activity.asset}:${activity.side || 'BUY'}`;
-        
+
         // Skip if we've already processed this exact trade
         if (this.processedTrades.has(tradeId)) {
             return; // Already processed this trade, skip to prevent double-counting
@@ -1159,14 +1184,58 @@ class MarketTracker {
         const category = this.extractMarketCategory(activity);
 
         const isNewMarket = !this.markets.has(marketKey);
-        
+
         // Remove older UpDown-15 markets before adding/updating
         // Always check, even if market exists, to catch older markets with different keys
         this.removeOlderUpDown15Markets(marketKey, activity);
         
         let market = this.markets.get(marketKey);
-        
+
         if (!market) {
+            // Calculate endDate - first try from activity, then calculate from slug
+            let endDate: number | undefined = activity.endDate ? activity.endDate * 1000 : undefined;
+
+            // FALLBACK: Calculate endDate from slug if not provided by API
+            // This is critical for the upcoming markets dashboard to show markets as READY
+            if (!endDate) {
+                const slug = activity.slug || activity.eventSlug || '';
+
+                // For 15-min markets: btc-updown-15m-{timestamp}
+                const timestamp15Match = slug.match(/updown-15m-(\d+)/);
+                if (timestamp15Match) {
+                    const startTime = parseInt(timestamp15Match[1], 10) * 1000;
+                    endDate = startTime + (15 * 60 * 1000); // 15 minutes from start
+                }
+
+                // For hourly markets: bitcoin-up-or-down-december-26-10am-et
+                if (!endDate) {
+                    const hourlyMatch = slug.match(/(\w+)-(\d+)-(\d{1,2})(am|pm)-et$/i);
+                    if (hourlyMatch) {
+                        const monthName = hourlyMatch[1];
+                        const day = parseInt(hourlyMatch[2], 10);
+                        let hour = parseInt(hourlyMatch[3], 10);
+                        const ampm = hourlyMatch[4].toLowerCase();
+                        if (ampm === 'pm' && hour !== 12) hour += 12;
+                        if (ampm === 'am' && hour === 12) hour = 0;
+
+                        const months: {[key: string]: number} = {
+                            january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+                            july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+                        };
+                        const monthNum = months[monthName.toLowerCase()] ?? 0;
+                        const year = new Date().getFullYear();
+
+                        // Create ET time and convert to UTC
+                        const etDateStr = `${year}-${String(monthNum + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:00:00`;
+                        const tempDate = new Date(etDateStr);
+                        const etOffset = new Date(tempDate.toLocaleString('en-US', { timeZone: 'America/New_York' })).getTime() -
+                                         new Date(tempDate.toLocaleString('en-US', { timeZone: 'UTC' })).getTime();
+                        const startTimeUTC = tempDate.getTime() - etOffset;
+                        endDate = startTimeUTC + (60 * 60 * 1000); // 1 hour from start
+                    }
+                }
+            }
+
             market = {
                 marketKey,
                 marketName: activity.title || activity.slug || marketKey,
@@ -1180,7 +1249,7 @@ class MarketTracker {
                 tradesUp: 0,
                 tradesDown: 0,
                 lastUpdate: Date.now(),
-                endDate: activity.endDate ? activity.endDate * 1000 : undefined, // Convert to milliseconds
+                endDate, // Now properly calculated
                 conditionId: activity.conditionId,
                 // Set BOTH asset IDs if provided (paper trades provide both)
                 // Otherwise infer from single asset based on outcome direction
@@ -1219,6 +1288,43 @@ class MarketTracker {
             // Update endDate and conditionId - ALWAYS update conditionId to handle market rotations
             if (activity.endDate) {
                 market.endDate = activity.endDate * 1000; // Convert to milliseconds
+            } else if (!market.endDate) {
+                // FALLBACK: Calculate endDate from slug if not provided by API and market doesn't have one
+                const slug = activity.slug || activity.eventSlug || market.marketSlug || '';
+
+                // For 15-min markets: btc-updown-15m-{timestamp}
+                const timestamp15Match = slug.match(/updown-15m-(\d+)/);
+                if (timestamp15Match) {
+                    const startTime = parseInt(timestamp15Match[1], 10) * 1000;
+                    market.endDate = startTime + (15 * 60 * 1000); // 15 minutes from start
+                }
+
+                // For hourly markets: bitcoin-up-or-down-december-26-10am-et
+                if (!market.endDate) {
+                    const hourlyMatch = slug.match(/(\w+)-(\d+)-(\d{1,2})(am|pm)-et$/i);
+                    if (hourlyMatch) {
+                        const monthName = hourlyMatch[1];
+                        const day = parseInt(hourlyMatch[2], 10);
+                        let hour = parseInt(hourlyMatch[3], 10);
+                        const ampm = hourlyMatch[4].toLowerCase();
+                        if (ampm === 'pm' && hour !== 12) hour += 12;
+                        if (ampm === 'am' && hour === 12) hour = 0;
+
+                        const months: {[key: string]: number} = {
+                            january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+                            july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+                        };
+                        const monthNum = months[monthName.toLowerCase()] ?? 0;
+                        const year = new Date().getFullYear();
+
+                        const etDateStr = `${year}-${String(monthNum + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:00:00`;
+                        const tempDate = new Date(etDateStr);
+                        const etOffset = new Date(tempDate.toLocaleString('en-US', { timeZone: 'America/New_York' })).getTime() -
+                                         new Date(tempDate.toLocaleString('en-US', { timeZone: 'UTC' })).getTime();
+                        const startTimeUTC = tempDate.getTime() - etOffset;
+                        market.endDate = startTimeUTC + (60 * 60 * 1000); // 1 hour from start
+                    }
+                }
             }
             if (activity.conditionId) {
                 // Update conditionId - handles market rotations (new 15-min window)
@@ -1867,6 +1973,75 @@ class MarketTracker {
         outputLines.push(chalk.gray('    PnL: ') + totalPnlAllColor.bold(`${totalPnlSign}$${totalPnlAll.toFixed(2)} (${totalPnlSign}${totalPnlPercent}%)`) + chalk.gray(` | Total Trades: ${totalTradesAll}`));
 
         outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+
+        // ==========================================================================
+        // UPCOMING MARKETS MINI DASHBOARD - Same as paper mode for consistency
+        // ==========================================================================
+        outputLines.push('');
+        outputLines.push(chalk.magenta.bold('  🔮 UPCOMING MARKETS'));
+
+        // Get current ET window info
+        const upcomingETFormatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        });
+        const upcomingETParts = upcomingETFormatter.formatToParts(new Date(now));
+        const upcomingHour = parseInt(upcomingETParts.find(p => p.type === 'hour')?.value || '0', 10);
+        const upcomingMinute = parseInt(upcomingETParts.find(p => p.type === 'minute')?.value || '0', 10);
+        const current15MinWindow = Math.floor(upcomingMinute / 15) * 15;
+        const next15MinWindow = (current15MinWindow + 15) % 60;
+        const nextWindowHour = current15MinWindow + 15 >= 60 ? (upcomingHour + 1) % 24 : upcomingHour;
+
+        // Format times
+        const formatTimeUpcoming = (h: number, m: number) => {
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+            return `${h12}:${m.toString().padStart(2, '0')}${ampm}`;
+        };
+
+        const currentWindowStr = `${formatTimeUpcoming(upcomingHour, current15MinWindow)}-${formatTimeUpcoming(nextWindowHour, next15MinWindow)}`;
+        const nextHourStr = upcomingHour < 12 ? `${upcomingHour + 1}AM` : upcomingHour === 11 ? '12PM' : upcomingHour === 23 ? '12AM' : `${upcomingHour - 11}PM`;
+
+        // Check what markets we have discovered
+        const hasBTC15m = Array.from(this.markets.values()).some(m => m.marketKey === 'BTC-UpDown-15' && m.endDate && m.endDate > now);
+        const hasETH15m = Array.from(this.markets.values()).some(m => m.marketKey === 'ETH-UpDown-15' && m.endDate && m.endDate > now);
+        const hasBTC1h = Array.from(this.markets.values()).some(m => m.marketKey.startsWith('BTC-UpDown-1h') && m.endDate && m.endDate > now);
+        const hasETH1h = Array.from(this.markets.values()).some(m => m.marketKey.startsWith('ETH-UpDown-1h') && m.endDate && m.endDate > now);
+
+        // Calculate seconds until next windows
+        const secsToNext15m = (15 - (upcomingMinute % 15)) * 60 - new Date(now).getSeconds();
+
+        outputLines.push('');
+        outputLines.push(chalk.gray('    Current Window: ') + chalk.white(currentWindowStr) + chalk.gray(' ET'));
+        outputLines.push('');
+
+        // 15-min status
+        const btc15mStatus = hasBTC15m ? chalk.green('✓ READY') : chalk.yellow('⏳ Waiting...');
+        const eth15mStatus = hasETH15m ? chalk.green('✓ READY') : chalk.yellow('⏳ Waiting...');
+        outputLines.push(chalk.gray('    15-Min: ') + chalk.cyan('BTC ') + btc15mStatus + chalk.gray(' | ') + chalk.cyan('ETH ') + eth15mStatus + chalk.gray(` | Next in ${secsToNext15m}s`));
+
+        // 1h status
+        const btc1hStatus = hasBTC1h ? chalk.green('✓ READY') : chalk.yellow('⏳ Waiting...');
+        const eth1hStatus = hasETH1h ? chalk.green('✓ READY') : chalk.yellow('⏳ Waiting...');
+        outputLines.push(chalk.gray('    1-Hour: ') + chalk.cyan('BTC ') + btc1hStatus + chalk.gray(' | ') + chalk.cyan('ETH ') + eth1hStatus + chalk.gray(` | Next: ${nextHourStr} ET`));
+
+        // Show tracked market slugs for debugging
+        const slugs15m = Array.from(this.markets.values())
+            .filter(m => m.marketKey.includes('-15'))
+            .map(m => {
+                const ts = m.marketSlug?.match(/updown-15m-(\d+)/)?.[1];
+                const isBTC = m.marketKey.includes('BTC');
+                return ts ? `${isBTC ? 'B' : 'E'}:${ts?.slice(-4)}` : null;
+            })
+            .filter(Boolean);
+
+        if (slugs15m.length > 0) {
+            outputLines.push(chalk.gray(`    Tracked: `) + chalk.dim(slugs15m.join(' | ')));
+        }
+
+        outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
         outputLines.push(''); // Empty line at end
 
         // Clear screen and print everything at once
@@ -2058,6 +2233,139 @@ class MarketTracker {
             };
 
             this.markets.set(position.marketKey, market);
+        }
+    }
+
+    /**
+     * Proactively discover 15-minute markets from Gamma API
+     * This ensures new markets appear on dashboard immediately, even before trader trades
+     */
+    private lastProactiveDiscovery = 0;
+    private proactiveDiscoveryInterval = 5000; // Check every 5 seconds
+
+    async proactivelyDiscover15MinMarkets(): Promise<void> {
+        const now = Date.now();
+
+        // Rate limit: only check every 5 seconds
+        if (now - this.lastProactiveDiscovery < this.proactiveDiscoveryInterval) {
+            return;
+        }
+        this.lastProactiveDiscovery = now;
+
+        // Calculate current 15-min window start
+        const current15MinStart = Math.floor(now / (15 * 60 * 1000)) * (15 * 60 * 1000);
+        const current15MinTimestamp = Math.floor(current15MinStart / 1000);
+
+        // Generate expected slugs for current window
+        const slugsToCheck = [
+            `btc-updown-15m-${current15MinTimestamp}`,
+            `eth-updown-15m-${current15MinTimestamp}`,
+        ];
+
+        for (const slug of slugsToCheck) {
+            // Check if we already have this market
+            const isBTC = slug.includes('btc');
+            const marketKey = isBTC ? 'BTC-UpDown-15' : 'ETH-UpDown-15';
+            const existingMarket = this.markets.get(marketKey);
+
+            // Skip if we already have this exact slug
+            if (existingMarket && existingMarket.marketSlug === slug) {
+                continue;
+            }
+
+            // Skip if existing market is still valid (not expired)
+            if (existingMarket && existingMarket.endDate && existingMarket.endDate > now) {
+                // Check if this is from the current window
+                const existingTimestamp = existingMarket.marketSlug?.match(/updown-15m-(\d+)/)?.[1];
+                if (existingTimestamp && parseInt(existingTimestamp, 10) === current15MinTimestamp) {
+                    continue;
+                }
+            }
+
+            try {
+                // Fetch market data from Gamma API
+                const url = `https://gamma-api.polymarket.com/events?slug=${slug}`;
+                const data = await fetchData(url).catch(() => null);
+
+                if (data && Array.isArray(data) && data.length > 0) {
+                    const event = data[0];
+                    const markets = event.markets || [];
+
+                    if (markets.length > 0) {
+                        const market = markets[0];
+                        const conditionId = market.conditionId;
+                        const clobTokenIds = market.clobTokenIds || [];
+
+                        // Parse end date
+                        let endDate: number | undefined;
+                        if (market.endDate) {
+                            endDate = typeof market.endDate === 'string'
+                                ? new Date(market.endDate).getTime()
+                                : market.endDate < 10000000000 ? market.endDate * 1000 : market.endDate;
+                        } else if (event.endDate) {
+                            endDate = typeof event.endDate === 'string'
+                                ? new Date(event.endDate).getTime()
+                                : event.endDate < 10000000000 ? event.endDate * 1000 : event.endDate;
+                        }
+
+                        // Fallback: calculate from slug
+                        if (!endDate) {
+                            endDate = current15MinStart + (15 * 60 * 1000);
+                        }
+
+                        // Get asset IDs
+                        let assetUp = clobTokenIds[0] || '';
+                        let assetDown = clobTokenIds[1] || '';
+
+                        // Check outcomes to determine correct order
+                        const outcomes = market.outcomes || [];
+                        if (outcomes.length >= 2) {
+                            const firstOutcome = (outcomes[0] || '').toLowerCase();
+                            if (firstOutcome === 'down' || firstOutcome === 'no') {
+                                // Swap - first token is DOWN
+                                [assetUp, assetDown] = [assetDown, assetUp];
+                            }
+                        }
+
+                        // Create or update market
+                        const marketName = market.question || event.title || slug;
+
+                        // Remove old market for this key before adding new one
+                        if (existingMarket) {
+                            this.markets.delete(marketKey);
+                        }
+
+                        // Add new market
+                        const newMarket: MarketStats = {
+                            marketKey,
+                            marketName,
+                            marketSlug: slug,
+                            sharesUp: 0,
+                            sharesDown: 0,
+                            investedUp: 0,
+                            investedDown: 0,
+                            totalCostUp: 0,
+                            totalCostDown: 0,
+                            tradesUp: 0,
+                            tradesDown: 0,
+                            lastUpdate: now,
+                            endDate,
+                            conditionId,
+                            assetUp,
+                            assetDown,
+                            marketOpenTime: now,
+                            category: marketKey,
+                        };
+
+                        this.markets.set(marketKey, newMarket);
+
+                        // Force display update
+                        this.lastDisplayTime = 0;
+                    }
+                }
+            } catch (error) {
+                // Silently ignore errors - market might not exist yet
+            }
         }
     }
 

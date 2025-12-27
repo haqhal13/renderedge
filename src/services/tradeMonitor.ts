@@ -324,8 +324,11 @@ const tradeMonitor = async () => {
     }
 
     while (isRunning) {
+        // Proactively discover 15-min markets (ensures they appear on dashboard immediately)
+        await marketTracker.proactivelyDiscover15MinMarkets();
+
         await fetchTradeData();
-        
+
         // Display market stats periodically
         await marketTracker.displayStats();
         
