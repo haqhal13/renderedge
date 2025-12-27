@@ -446,16 +446,18 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
     }
 
     // ==========================================================================
-    // CLEANUP: Remove ONLY truly expired markets (timer fully ran out)
-    // Keep markets visible until their timer hits 0
+    // CLEANUP: Remove ONLY truly expired markets (after grace period)
+    // Keep markets visible for 60 seconds after endDate to prevent data reset
     // ==========================================================================
+    const CLEANUP_GRACE_PERIOD_MS = 60 * 1000; // 60 seconds grace period
+
     for (const [id, market] of discoveredMarkets.entries()) {
         const endDateMs = market.endDate && market.endDate < 10000000000
             ? market.endDate * 1000
             : market.endDate;
 
-        // ONLY remove if truly expired (endDate has passed)
-        if (endDateMs && endDateMs <= now) {
+        // ONLY remove if expired BEYOND grace period (endDate + 60s has passed)
+        if (endDateMs && endDateMs + CLEANUP_GRACE_PERIOD_MS <= now) {
             const buildState = buildingPositions.get(id);
             if (buildState) {
                 if (buildState.investedUp > 0 || buildState.investedDown > 0) {
@@ -465,7 +467,7 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
                 buildingPositions.delete(id);
             }
             discoveredMarkets.delete(id);
-            debugLog(`🗑️ Removed expired market: ${market.marketKey} | timer ran out`);
+            debugLog(`🗑️ Removed expired market: ${market.marketKey} | grace period ended`);
         }
     }
 
@@ -479,35 +481,41 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
     }
 
     // PRE-FETCH: Check how much time is left in current window
-    // If less than 60 seconds left, aggressively fetch next markets
+    // Start fetching NEXT markets 3 minutes before current window ends
+    // This ensures markets are ready and tradeable immediately when the window switches
     const timeToNextWindow = nextWindowStart - now;
-    const PRE_FETCH_THRESHOLD = 60 * 1000; // 60 seconds before window ends
+    const PRE_FETCH_THRESHOLD = 3 * 60 * 1000; // 3 minutes before window ends (was 60s)
     const shouldPreFetch = timeToNextWindow <= PRE_FETCH_THRESHOLD && timeToNextWindow > 0;
 
-    if (shouldPreFetch) {
-        // Force re-fetch of NEXT window markets so they're ready when current expires
-        const nextBtcSlug = `btc-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
-        const nextEthSlug = `eth-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+    // Generate next window slugs
+    const nextBtcSlug = `btc-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+    const nextEthSlug = `eth-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
 
-        // Check if we already have next markets
-        const haveNextBTC = Array.from(discoveredMarkets.values()).some(m =>
-            m.marketSlug === nextBtcSlug && m.endDate && m.endDate > now
-        );
-        const haveNextETH = Array.from(discoveredMarkets.values()).some(m =>
-            m.marketSlug === nextEthSlug && m.endDate && m.endDate > now
-        );
+    // ALWAYS try to have next markets ready (not just in pre-fetch window)
+    const haveNextBTC = Array.from(discoveredMarkets.values()).some(m =>
+        m.marketSlug === nextBtcSlug && m.endDate && m.endDate > now
+    );
+    const haveNextETH = Array.from(discoveredMarkets.values()).some(m =>
+        m.marketSlug === nextEthSlug && m.endDate && m.endDate > now
+    );
 
+    // If we don't have next markets and we're within pre-fetch window, force fetch
+    if (shouldPreFetch || !haveNextBTC || !haveNextETH) {
         if (!haveNextBTC) {
             fetchedSlugs.delete(nextBtcSlug);
-            debugLog(`⏰ Pre-fetching next BTC 15m (${Math.floor(timeToNextWindow/1000)}s until switch)`);
+            if (shouldPreFetch) {
+                debugLog(`⏰ Pre-fetching next BTC 15m (${Math.floor(timeToNextWindow/1000)}s until switch)`);
+            }
         }
         if (!haveNextETH) {
             fetchedSlugs.delete(nextEthSlug);
-            debugLog(`⏰ Pre-fetching next ETH 15m (${Math.floor(timeToNextWindow/1000)}s until switch)`);
+            if (shouldPreFetch) {
+                debugLog(`⏰ Pre-fetching next ETH 15m (${Math.floor(timeToNextWindow/1000)}s until switch)`);
+            }
         }
     }
 
-    // Same for hourly markets - pre-fetch when less than 60s left in hour
+    // Same for hourly markets - pre-fetch when less than 5 minutes left in hour
     const nextHourStart = new Date(now);
     nextHourStart.setMinutes(0, 0, 0);
     nextHourStart.setHours(nextHourStart.getHours() + 1);
@@ -515,8 +523,9 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
     const etNow = new Date(new Date(now).toLocaleString('en-US', { timeZone: 'America/New_York' }));
     const currentMinuteET = etNow.getMinutes();
     const timeToNextHour = (60 - currentMinuteET) * 60 * 1000 - (etNow.getSeconds() * 1000);
+    const HOURLY_PRE_FETCH_THRESHOLD = 5 * 60 * 1000; // 5 minutes for hourly
 
-    if (timeToNextHour <= PRE_FETCH_THRESHOLD && timeToNextHour > 0) {
+    if (timeToNextHour <= HOURLY_PRE_FETCH_THRESHOLD && timeToNextHour > 0) {
         debugLog(`⏰ Pre-fetching next hourly markets (${Math.floor(timeToNextHour/1000)}s until hour change)`);
     }
 
@@ -2119,11 +2128,15 @@ function displayStatus(): void {
         }
     };
     
+    // Grace period: Keep markets visible for 60 seconds after endDate
+    // This prevents trades from resetting to 0 before the new market is discovered
+    const DISPLAY_GRACE_PERIOD_MS = 60 * 1000;
+
     const activeMarkets = Array.from(discoveredMarkets.entries()).filter(
         ([id, m]) => {
-            // First filter: not expired
-            if (m.endDate && m.endDate <= now) {
-                debugLog(`Filtered out ${m.marketKey}: expired (endDate=${new Date(m.endDate).toISOString()} <= now=${new Date(now).toISOString()})`);
+            // First filter: not expired (with grace period for display)
+            if (m.endDate && m.endDate + DISPLAY_GRACE_PERIOD_MS <= now) {
+                debugLog(`Filtered out ${m.marketKey}: expired beyond grace period`);
                 return false;
             }
 
