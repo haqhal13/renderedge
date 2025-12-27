@@ -202,6 +202,8 @@ interface PositionBuildState {
     lastTradeTime: number; // Last trade timestamp
     nextTradeTime: number; // When next trade should happen (gap applied once after each trade)
     tradeCount: number;    // Number of trades executed
+    tradeCountUp: number;  // Number of UP trades executed (for accurate display)
+    tradeCountDown: number; // Number of DOWN trades executed (for accurate display)
     avgPriceUp: number;    // Weighted average price for UP
     avgPriceDown: number;  // Weighted average price for DOWN
     // DYNAMIC REBALANCING - track price history for momentum detection
@@ -428,58 +430,71 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
 
     if (windowChanged || hourChanged) {
         fetchedSlugs.clear();
-
-        // ==========================================================================
-        // CRITICAL FIX: Clean up ALL markets from PREVIOUS window, not just expired!
-        // When a new window starts, ALL positions from the old window must be finalized
-        // and removed to prevent carryover confusion.
-        // ==========================================================================
-
-        Logger.info(`🔄 New ${windowChanged ? '15-min window' : 'hour'} detected! Cleaning up ALL old positions...`);
-
-        for (const [id, market] of discoveredMarkets.entries()) {
-            // Convert endDate to ms if needed
-            const endDateMs = market.endDate && market.endDate < 10000000000
-                ? market.endDate * 1000
-                : market.endDate;
-
-            // Check if market belongs to PREVIOUS window (endDate <= currentWindowStart for 15m, or expired for 1h)
-            // OR if market is expired
-            const is15m = market.marketKey.includes('-15');
-            const belongsToPreviousWindow = is15m
-                ? (endDateMs && endDateMs <= currentWindowStart) // 15m market from before this window
-                : (endDateMs && endDateMs <= now); // 1h market that's expired
-
-            const isExpired = endDateMs && endDateMs <= now;
-
-            if (belongsToPreviousWindow || isExpired) {
-                // Finalize any building position before removing
-                const buildState = buildingPositions.get(id);
-                if (buildState) {
-                    if (buildState.investedUp > 0 || buildState.investedDown > 0) {
-                        debugLog(`🔄 Window changed: Finalizing ${market.marketKey} (invested: UP $${buildState.investedUp.toFixed(2)}, DOWN $${buildState.investedDown.toFixed(2)})`);
-                        // Reclaim invested capital (will be settled later)
-                        currentCapital += buildState.investedUp + buildState.investedDown;
-                    }
-                    buildingPositions.delete(id);
-                }
-                discoveredMarkets.delete(id);
-                debugLog(`🗑️ Removed old market: ${market.marketKey} | slug=${market.marketSlug} | endDate=${endDateMs ? new Date(endDateMs).toISOString() : 'none'}`);
-            }
-        }
-
-        // Also clean up any orphaned building positions (safety net)
-        for (const [id, buildState] of buildingPositions.entries()) {
-            if (!discoveredMarkets.has(id)) {
-                debugLog(`🗑️ Removed orphaned building position: ${buildState.marketKey}`);
-                currentCapital += buildState.investedUp + buildState.investedDown;
-                buildingPositions.delete(id);
-            }
-        }
-
         lastProcessedWindow = currentWindowStart;
         lastHourProcessed = currentHourET;
-        Logger.info(`✅ Cleanup complete. Ready for new markets. Capital: $${currentCapital.toFixed(2)}`);
+        Logger.info(`🔄 New ${windowChanged ? '15-min window' : 'hour'} detected! Scanning for new markets...`);
+
+        // =======================================================================
+        // CRITICAL FIX: Finalize OLD 15-min buildStates when window changes
+        // This prevents trades from old windows being counted in new windows
+        // Markets stay visible for display, but trading is STOPPED immediately
+        // =======================================================================
+        if (windowChanged) {
+            for (const [id, market] of discoveredMarkets.entries()) {
+                if (!market.marketKey.includes('-15')) continue;
+                if (!market.marketSlug) continue;
+
+                const slugMatch = market.marketSlug.match(/updown-15m-(\d+)/);
+                if (!slugMatch) continue;
+
+                const marketStartTimestamp = parseInt(slugMatch[1], 10) * 1000;
+
+                // If this market started before the current window, finalize its buildState
+                if (marketStartTimestamp < currentWindowStart) {
+                    const buildState = buildingPositions.get(id);
+                    if (buildState && (buildState.investedUp > 0 || buildState.investedDown > 0)) {
+                        debugLog(`🔄 Window change: Finalizing OLD market ${market.marketKey} (${buildState.tradeCount} trades, UP $${buildState.investedUp.toFixed(2)}, DOWN $${buildState.investedDown.toFixed(2)})`);
+                        // Return capital (position is finalized)
+                        currentCapital += buildState.investedUp + buildState.investedDown;
+                        buildingPositions.delete(id);
+                        Logger.info(`📊 Finalized: ${market.marketKey} | ${buildState.tradeCount} trades | UP $${buildState.investedUp.toFixed(2)} / DOWN $${buildState.investedDown.toFixed(2)}`);
+                    }
+                }
+            }
+        }
+    }
+
+    // ==========================================================================
+    // CLEANUP: Remove ONLY truly expired markets (timer fully ran out)
+    // Keep markets visible until their timer hits 0
+    // ==========================================================================
+    for (const [id, market] of discoveredMarkets.entries()) {
+        const endDateMs = market.endDate && market.endDate < 10000000000
+            ? market.endDate * 1000
+            : market.endDate;
+
+        // ONLY remove if truly expired (endDate has passed)
+        if (endDateMs && endDateMs <= now) {
+            const buildState = buildingPositions.get(id);
+            if (buildState) {
+                if (buildState.investedUp > 0 || buildState.investedDown > 0) {
+                    debugLog(`⏰ Market expired: Finalizing ${market.marketKey} (UP $${buildState.investedUp.toFixed(2)}, DOWN $${buildState.investedDown.toFixed(2)})`);
+                    currentCapital += buildState.investedUp + buildState.investedDown;
+                }
+                buildingPositions.delete(id);
+            }
+            discoveredMarkets.delete(id);
+            debugLog(`🗑️ Removed expired market: ${market.marketKey} | timer ran out`);
+        }
+    }
+
+    // Clean up orphaned building positions (safety net)
+    for (const [id, buildState] of buildingPositions.entries()) {
+        if (!discoveredMarkets.has(id)) {
+            debugLog(`🗑️ Removed orphaned building position: ${buildState.marketKey}`);
+            currentCapital += buildState.investedUp + buildState.investedDown;
+            buildingPositions.delete(id);
+        }
     }
 
     // PRE-FETCH: Check how much time is left in current window
@@ -732,24 +747,10 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
 
                 if (!discoveredMarkets.has(conditionId)) {
                     // ==========================================================================
-                    // CRITICAL: Before adding NEW market, clean up OLD markets with same marketKey
-                    // This prevents stale trades from carrying over to new market windows
+                    // Allow multiple markets with same marketKey to coexist (old + new)
+                    // Old market stays visible until its timer runs out
+                    // Only stop TRADING on old market, but keep it for display
                     // ==========================================================================
-                    for (const [oldId, oldMarket] of discoveredMarkets.entries()) {
-                        if (oldMarket.marketKey === marketKey && oldId !== conditionId) {
-                            // Finalize and clean up old position
-                            const oldBuildState = buildingPositions.get(oldId);
-                            if (oldBuildState) {
-                                if (oldBuildState.investedUp > 0 || oldBuildState.investedDown > 0) {
-                                    debugLog(`🔄 New market replacing old: ${marketKey} | Finalizing old position (UP $${oldBuildState.investedUp.toFixed(2)}, DOWN $${oldBuildState.investedDown.toFixed(2)})`);
-                                    currentCapital += oldBuildState.investedUp + oldBuildState.investedDown;
-                                }
-                                buildingPositions.delete(oldId);
-                            }
-                            discoveredMarkets.delete(oldId);
-                            debugLog(`🗑️ Removed old ${marketKey} market (slug=${oldMarket.marketSlug}) to make room for new (slug=${slug})`);
-                        }
-                    }
 
                     discoveredMarkets.set(conditionId, newMarket);
                     proactivelyDiscoveredIds.add(conditionId);
@@ -983,24 +984,9 @@ async function discoverMarketsFromWatchers(): Promise<void> {
             };
 
             // ==========================================================================
-            // CRITICAL: Before adding NEW market, clean up OLD markets with same marketKey
-            // This prevents stale trades from carrying over to new market windows
+            // Allow multiple markets with same marketKey to coexist (old + new)
+            // Old market stays visible until its timer runs out
             // ==========================================================================
-            for (const [oldId, oldMarket] of discoveredMarkets.entries()) {
-                if (oldMarket.marketKey === market.marketKey && oldId !== id) {
-                    // Finalize and clean up old position
-                    const oldBuildState = buildingPositions.get(oldId);
-                    if (oldBuildState) {
-                        if (oldBuildState.investedUp > 0 || oldBuildState.investedDown > 0) {
-                            debugLog(`🔄 Watcher found new market replacing old: ${market.marketKey} | Finalizing old (UP $${oldBuildState.investedUp.toFixed(2)}, DOWN $${oldBuildState.investedDown.toFixed(2)})`);
-                            currentCapital += oldBuildState.investedUp + oldBuildState.investedDown;
-                        }
-                        buildingPositions.delete(oldId);
-                    }
-                    discoveredMarkets.delete(oldId);
-                    debugLog(`🗑️ Removed old ${market.marketKey} (slug=${oldMarket.marketSlug}) for new (slug=${market.marketSlug})`);
-                }
-            }
 
             discoveredMarkets.set(id, newMarket);
 
@@ -1219,6 +1205,32 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         return;
     }
 
+    // ==========================================================================
+    // CRITICAL FIX: For 15-min markets, verify this is the CURRENT window!
+    // This prevents trades on OLD markets that haven't expired yet
+    // Only the current window should receive new trades
+    // ==========================================================================
+    if (market.marketKey.includes('-15') && market.marketSlug) {
+        const slugTimestampMatch = market.marketSlug.match(/updown-15m-(\d+)/);
+        if (slugTimestampMatch) {
+            const marketStartTimestamp = parseInt(slugTimestampMatch[1], 10) * 1000;
+
+            // Calculate what the CURRENT 15-min window should be
+            const currentWindowStart = Math.floor(now / (15 * 60 * 1000)) * (15 * 60 * 1000);
+
+            // If this market's start time doesn't match current window, skip trading!
+            if (marketStartTimestamp !== currentWindowStart) {
+                // First time we skip this market for being old, log it
+                const skipKey = `skip-old-window-${positionKey}`;
+                if (!discoveredConditionIds.has(skipKey)) {
+                    discoveredConditionIds.add(skipKey);
+                    debugLog(`buildPosition: ${market.marketKey} - SKIPPED (old window: market=${new Date(marketStartTimestamp).toISOString()}, current=${new Date(currentWindowStart).toISOString()})`);
+                }
+                return; // Don't trade on old windows!
+            }
+        }
+    }
+
     // Skip if no valid prices
     if (!market.priceUp || !market.priceDown || market.priceUp <= 0 || market.priceDown <= 0) {
         return;
@@ -1290,6 +1302,8 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
             lastTradeTime: 0,
             nextTradeTime: now, // Trade immediately on first iteration
             tradeCount: 0,
+            tradeCountUp: 0,   // Track UP trades separately
+            tradeCountDown: 0, // Track DOWN trades separately
             avgPriceUp: 0,
             avgPriceDown: 0,
             // DYNAMIC REBALANCING - capture initial prices for momentum tracking
@@ -1529,6 +1543,7 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         buildState.investedUp = totalInvestedUp;
         currentCapital -= tradeUp;
         buildState.tradeCount++;
+        buildState.tradeCountUp++;  // Track UP trades separately
         totalTrades++;
 
         // Create temporary position for logging
@@ -1560,6 +1575,7 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         buildState.investedDown = totalInvestedDown;
         currentCapital -= tradeDown;
         buildState.tradeCount++;
+        buildState.tradeCountDown++;  // Track DOWN trades separately
         totalTrades++;
 
         const tempPos: MarketPosition = {
@@ -2096,10 +2112,9 @@ function displayStatus(): void {
             const sharesUp = avgPriceUp > 0 ? investedUp / avgPriceUp : (position?.sharesUp || 0);
             const sharesDown = avgPriceDown > 0 ? investedDown / avgPriceDown : (position?.sharesDown || 0);
 
-            // Get trade counts (buildState has tradeCount, split roughly evenly)
-            const totalTradeCount = buildState ? buildState.tradeCount : 0;
-            const tradesUp = Math.ceil(totalTradeCount / 2);
-            const tradesDown = Math.floor(totalTradeCount / 2);
+            // Get trade counts (buildState tracks UP and DOWN separately)
+            const tradesUp = buildState ? buildState.tradeCountUp : 0;
+            const tradesDown = buildState ? buildState.tradeCountDown : 0;
 
             // Get live prices
             const liveUp = m.priceUp || 0;
@@ -2256,6 +2271,76 @@ function displayStatus(): void {
     }
 
     lines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+
+    // ==========================================================================
+    // UPCOMING MARKETS MINI DASHBOARD - Show what's being tracked/fetched
+    // ==========================================================================
+    lines.push('');
+    lines.push(chalk.magenta.bold('  🔮 UPCOMING MARKETS'));
+
+    // Get current ET window info
+    const upcomingETFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    });
+    const upcomingETParts = upcomingETFormatter.formatToParts(new Date(now));
+    const upcomingHour = parseInt(upcomingETParts.find(p => p.type === 'hour')?.value || '0', 10);
+    const upcomingMinute = parseInt(upcomingETParts.find(p => p.type === 'minute')?.value || '0', 10);
+    const current15MinWindow = Math.floor(upcomingMinute / 15) * 15;
+    const next15MinWindow = (current15MinWindow + 15) % 60;
+    const nextWindowHour = current15MinWindow + 15 >= 60 ? (upcomingHour + 1) % 24 : upcomingHour;
+
+    // Format times
+    const formatTime = (h: number, m: number) => {
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+        return `${h12}:${m.toString().padStart(2, '0')}${ampm}`;
+    };
+
+    const currentWindowStr = `${formatTime(upcomingHour, current15MinWindow)}-${formatTime(nextWindowHour, next15MinWindow)}`;
+    const nextHourStr = upcomingHour < 12 ? `${upcomingHour + 1}AM` : upcomingHour === 11 ? '12PM' : upcomingHour === 23 ? '12AM' : `${upcomingHour - 11}PM`;
+
+    // Check what markets we have discovered
+    const hasBTC15m = Array.from(discoveredMarkets.values()).some(m => m.marketKey === 'BTC-UpDown-15' && m.endDate && m.endDate > now);
+    const hasETH15m = Array.from(discoveredMarkets.values()).some(m => m.marketKey === 'ETH-UpDown-15' && m.endDate && m.endDate > now);
+    const hasBTC1h = Array.from(discoveredMarkets.values()).some(m => m.marketKey.startsWith('BTC-UpDown-1h') && m.endDate && m.endDate > now);
+    const hasETH1h = Array.from(discoveredMarkets.values()).some(m => m.marketKey.startsWith('ETH-UpDown-1h') && m.endDate && m.endDate > now);
+
+    // Calculate seconds until next 15-min window
+    const secsToNext15m = (15 - (upcomingMinute % 15)) * 60 - new Date(now).getSeconds();
+    const secsToNextHour = (60 - upcomingMinute) * 60 - new Date(now).getSeconds();
+
+    lines.push('');
+    lines.push(chalk.gray('    Current Window: ') + chalk.white(currentWindowStr) + chalk.gray(' ET'));
+    lines.push('');
+
+    // 15-min status
+    const btc15mStatus = hasBTC15m ? chalk.green('✓ READY') : chalk.yellow('⏳ Fetching...');
+    const eth15mStatus = hasETH15m ? chalk.green('✓ READY') : chalk.yellow('⏳ Fetching...');
+    lines.push(chalk.gray('    15-Min: ') + chalk.cyan('BTC ') + btc15mStatus + chalk.gray(' | ') + chalk.cyan('ETH ') + eth15mStatus + chalk.gray(` | Next in ${secsToNext15m}s`));
+
+    // 1h status
+    const btc1hStatus = hasBTC1h ? chalk.green('✓ READY') : chalk.yellow('⏳ Fetching...');
+    const eth1hStatus = hasETH1h ? chalk.green('✓ READY') : chalk.yellow('⏳ Fetching...');
+    lines.push(chalk.gray('    1-Hour: ') + chalk.cyan('BTC ') + btc1hStatus + chalk.gray(' | ') + chalk.cyan('ETH ') + eth1hStatus + chalk.gray(` | Next: ${nextHourStr} ET`));
+
+    // Show discovered market slugs for debugging
+    const slugs15m = Array.from(discoveredMarkets.values())
+        .filter(m => m.marketKey.includes('-15'))
+        .map(m => {
+            const ts = m.marketSlug?.match(/updown-15m-(\d+)/)?.[1];
+            const isBTC = m.marketKey.includes('BTC');
+            return ts ? `${isBTC ? 'B' : 'E'}:${ts?.slice(-4)}` : null;
+        })
+        .filter(Boolean);
+
+    if (slugs15m.length > 0) {
+        lines.push(chalk.gray(`    Tracked: `) + chalk.dim(slugs15m.join(' | ')));
+    }
+
+    lines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
     lines.push('');
 
     // Output everything at once
@@ -2331,7 +2416,7 @@ const paperTradeMonitor = async () => {
 
     let lastDisplayTime = 0;
     let lastCleanupTime = 0;
-    const DISPLAY_INTERVAL_MS = 1500; // Refresh dashboard every 1.5s (prices update faster in background)
+    const DISPLAY_INTERVAL_MS = 3000; // Refresh dashboard every 3s to reduce flickering
     const CLEANUP_INTERVAL_MS = 30000; // Clean up expired markets every 30 seconds
     let loopCount = 0;
 
