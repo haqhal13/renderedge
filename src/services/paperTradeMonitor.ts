@@ -47,45 +47,49 @@ const PAPER_BTC_MAX_PER_MARKET = parseFloat(process.env.PAPER_BTC_MAX_PER_MARKET
 const PAPER_ETH_MAX_PER_MARKET = parseFloat(process.env.PAPER_ETH_MAX_PER_MARKET || '1800');
 
 // =============================================================================
-// THE SECRET SAUCE: EXACT WATCHER SHARE DISTRIBUTIONS (Dec 26 6200 trades)
-// KEY INSIGHT: BTC and ETH have DIFFERENT share distributions!
-// BTC 15m: 28(12.8%), 5(11.7%), 1(10.4%), 3(6.3%), 2(6.2%)
-// ETH 15m: 16(45.6%!), 15(9.5%), 14(5.7%), 5(5.5%), 2(5.1%)
+// THE SECRET SAUCE: EXACT WATCHER SHARE DISTRIBUTIONS (Dec 27 - 35,075 trades!)
+// KEY INSIGHT: 22 shares is #1 for BTC at 14.2%! Paper was missing this entirely!
+// BTC 15m: 22(14.2%), 5(9.6%), 2(7.7%), 1(6.7%), 3(5.3%)
+// ETH 15m: 12(26.6%!), 11(8.5%), 16(8.2%), 5(7.4%), 9(5.9%)
 // =============================================================================
-// BTC 15-min share distribution (4141 trades analyzed)
-const BTC_15M_SHARE_AMOUNTS = [28, 5, 1, 3, 2, 20, 6, 4, 10, 27, 26, 7, 8, 15, 25];
-const BTC_15M_SHARE_WEIGHTS = [12.8, 11.7, 10.4, 6.3, 6.2, 3.9, 3.8, 3.5, 3.3, 2.8, 2.6, 2.5, 2.4, 2.4, 2.3];
+// BTC 15-min share distribution (19,652 trades analyzed)
+const BTC_15M_SHARE_AMOUNTS = [22, 5, 2, 1, 3, 28, 10, 20, 21, 4, 6, 7, 16, 17, 19];
+const BTC_15M_SHARE_WEIGHTS = [14.2, 9.6, 7.7, 6.7, 5.3, 4.6, 4.1, 3.9, 3.8, 3.4, 3.3, 2.9, 2.9, 2.7, 2.7];
 
-// ETH 15-min share distribution (1238 trades analyzed) - VERY different!
-const ETH_15M_SHARE_AMOUNTS = [16, 15, 14, 5, 2, 13, 11, 12, 3, 10, 1, 6, 8, 4, 9];
-const ETH_15M_SHARE_WEIGHTS = [45.6, 9.5, 5.7, 5.5, 5.1, 4.9, 3.6, 3.4, 3.2, 2.4, 2.3, 2.1, 2.0, 1.7, 1.5];
+// ETH 15-min share distribution (8,729 trades analyzed) - 12 shares is #1!
+const ETH_15M_SHARE_AMOUNTS = [12, 11, 16, 5, 9, 2, 10, 3, 8, 7, 6, 1, 4, 15, 13];
+const ETH_15M_SHARE_WEIGHTS = [26.6, 8.5, 8.2, 7.4, 5.9, 5.8, 5.7, 5.3, 5.1, 4.2, 3.7, 3.7, 3.5, 2.3, 1.5];
 
-// 1-hour market share distribution (different from 15m)
-const BTC_1H_SHARE_AMOUNTS = [22, 2, 5, 6, 3, 4, 1, 10, 20, 8];
-const BTC_1H_SHARE_WEIGHTS = [19.0, 18.6, 10.5, 9.5, 8.9, 7.6, 5.8, 3.7, 1.9, 1.6];
+// 1-hour market share distribution (BTC 3,769 trades, ETH 2,925 trades)
+const BTC_1H_SHARE_AMOUNTS = [22, 5, 2, 10, 6, 3, 1, 4, 12, 11];
+const BTC_1H_SHARE_WEIGHTS = [15.0, 12.0, 10.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.5, 3.0];
 
-// Legacy fallback (used if market key doesn't match)
+const ETH_1H_SHARE_AMOUNTS = [12, 11, 5, 2, 9, 10, 3, 8, 6, 7];
+const ETH_1H_SHARE_WEIGHTS = [20.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.5, 5.0, 4.5, 4.0];
+
+// Legacy fallback
 const TARGET_SHARE_AMOUNTS = BTC_15M_SHARE_AMOUNTS;
 const SHARE_WEIGHTS = BTC_15M_SHARE_WEIGHTS;
 const MIN_SHARES = 0.5;
 
 // =============================================================================
-// TIMING PATTERNS (from Dec 26 6200 trades analysis)
-// EXACT gap distribution: 76.6% at 2-3s, 13.8% at 4-5s, 6.8% at 5-10s
-// Average gap: 3.09s, Median gap: 2.00s
-// Trade rate: 60-80 trades/minute during active periods
+// TIMING PATTERNS (from Dec 27 - 35,075 trades analysis)
+// CRITICAL: Paper was at 1-2s gaps but watcher is at 2-3s gaps (79.8%!)
+// Gap distribution: 79.8% at 2-3s, 11.0% at 4-5s, 6.1% at 5-10s
+// Average gap: 3.00s, Median gap: 2.00s
+// Trade rate: 78.1 trades/minute average
 // =============================================================================
-const BATCH_INTERVAL_MS = 2000; // Base batch interval
+const BATCH_INTERVAL_MS = 2500; // Increased from 2000ms
 const BASE_GAP_MS = 2500; // Base gap between trades
-const POLL_INTERVAL_MS = 200; // Fast price updates
+const POLL_INTERVAL_MS = 300; // Poll interval
 
-// Direction balance: EXACTLY 50/50 - no momentum bias needed!
-// Analysis shows 49.1% UP, 50.9% DOWN - essentially 50/50
-const UP_BIAS = 0.50; // True 50/50 split
-const DIRECTION_VARIANCE = 0.01; // Very small variance
+// Direction balance: 49.7% UP, 50.3% DOWN - true 50/50
+const UP_BIAS = 0.497; // Match exact watcher ratio
+const DIRECTION_VARIANCE = 0.01;
 
-// BTC vs ETH allocation: 75% BTC, 25% ETH (3:1 ratio from 6200 trades)
-const BTC_ALLOCATION_RATIO = 0.75;
+// BTC vs ETH allocation: 66.8% BTC, 33.2% ETH (2:1 ratio from 35,075 trades)
+// Paper was at 51.3% BTC - need to increase!
+const BTC_ALLOCATION_RATIO = 0.668;
 
 // =============================================================================
 // MOMENTUM CHASING - ANALYSIS SHOWS NO MOMENTUM BIAS!
@@ -1137,16 +1141,18 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
     if (!buildState) {
         // =======================================================================
         // POSITION INITIALIZATION - Matches watcher's per-market allocation
-        // NEW DATA: avg $2,398/market, median $1,961
-        // Paper was only $895 - need to increase significantly
+        // Dec 27 DATA (35,075 trades):
+        // - BTC 15m: $118,957 across 19,652 trades = $6.05/trade
+        // - ETH 15m: $39,124 across 8,729 trades = $4.48/trade
+        // - BTC:ETH ratio = 66.8:33.2 = 2:1 preference for BTC
         // =======================================================================
         const isBTC = market.marketKey.includes('BTC');
         const maxPerMarket = isBTC ? PAPER_BTC_MAX_PER_MARKET : PAPER_ETH_MAX_PER_MARKET;
 
-        // Dec 26 DATA: Paper $774/market vs Watcher $2,324/market
-        // CRITICAL FIX: Increase from 50% to 70% of capital per market
-        // Watcher invests ~$2000-2400 per market with ~400 trades/market
-        const positionSize = Math.min(maxPerMarket, currentCapital * 0.70);
+        // Watcher invests 2x more in BTC than ETH
+        // BTC gets 70% of capital, ETH gets 50%
+        const capitalRatio = isBTC ? 0.75 : 0.50;
+        const positionSize = Math.min(maxPerMarket, currentCapital * capitalRatio);
 
         if (positionSize < 10) { // Minimum $10 per position
             return;
@@ -1220,13 +1226,17 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
             shareAmounts = BTC_15M_SHARE_AMOUNTS;
             shareWeights = BTC_15M_SHARE_WEIGHTS;
         } else if (!isBTC && is15m) {
-            // ETH 15-min - very different distribution!
+            // ETH 15-min - 12 shares is #1 at 26.6%!
             shareAmounts = ETH_15M_SHARE_AMOUNTS;
             shareWeights = ETH_15M_SHARE_WEIGHTS;
-        } else if (is1h) {
-            // 1-hour markets use BTC 1h distribution for both
+        } else if (isBTC && is1h) {
+            // BTC 1-hour - 22 shares is #1
             shareAmounts = BTC_1H_SHARE_AMOUNTS;
             shareWeights = BTC_1H_SHARE_WEIGHTS;
+        } else if (!isBTC && is1h) {
+            // ETH 1-hour - 12 shares is #1
+            shareAmounts = ETH_1H_SHARE_AMOUNTS;
+            shareWeights = ETH_1H_SHARE_WEIGHTS;
         } else {
             // Fallback to BTC 15m
             shareAmounts = BTC_15M_SHARE_AMOUNTS;
@@ -1435,20 +1445,21 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
     }
 
     // Set next trade time based on EXACT watcher gap distribution
-    // Dec 26 6200 trades: 76.6% at 2-3s, 13.8% at 4-5s, 6.8% at 5-10s, 2.1% at 10-20s
-    // Average: 3.09s, Median: 2.00s - very tight clustering!
+    // Dec 27 - 35,075 trades: 79.8% at 2-3s, 11.0% at 4-5s, 6.1% at 5-10s, 2.2% at 10-20s
+    // Average: 3.00s, Median: 2.00s
+    // CRITICAL: Paper was trading at 1-2s (80.8%) - TOO FAST!
     const gapRoll = Math.random();
     let gap: number;
-    if (gapRoll < 0.766) {
-        gap = 2000 + Math.random() * 1000; // 2-3s (76.6% - EXACT watcher match)
-    } else if (gapRoll < 0.904) {
-        gap = 4000 + Math.random() * 1000; // 4-5s (13.8%)
-    } else if (gapRoll < 0.972) {
-        gap = 5000 + Math.random() * 5000; // 5-10s (6.8%)
-    } else if (gapRoll < 0.993) {
-        gap = 10000 + Math.random() * 10000; // 10-20s (2.1%)
+    if (gapRoll < 0.798) {
+        gap = 2000 + Math.random() * 1000; // 2-3s (79.8% - EXACT watcher match)
+    } else if (gapRoll < 0.908) {
+        gap = 4000 + Math.random() * 1000; // 4-5s (11.0%)
+    } else if (gapRoll < 0.969) {
+        gap = 5000 + Math.random() * 5000; // 5-10s (6.1%)
+    } else if (gapRoll < 0.991) {
+        gap = 10000 + Math.random() * 10000; // 10-20s (2.2%)
     } else {
-        gap = 20000 + Math.random() * 10000; // 20-30s (0.7%)
+        gap = 20000 + Math.random() * 10000; // 20s+ (0.9%)
     }
 
     buildState.lastTradeTime = now;
