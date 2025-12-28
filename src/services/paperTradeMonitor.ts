@@ -22,6 +22,7 @@ import fetchData from '../utils/fetchData';
 import Logger from '../utils/logger';
 import marketTracker from './marketTracker';
 import tradeLogger from './tradeLogger';
+import priceStreamLogger from './priceStreamLogger';
 
 // Debug log file for paper mode (won't be cleared by screen refresh)
 const debugLogPath = path.join(process.cwd(), 'logs', 'paper_debug.log');
@@ -1253,6 +1254,7 @@ async function updatePrices(): Promise<void> {
 
             // CRITICAL: Sync prices AND assets to marketTracker for dashboard display
             // This ensures the dashboard shows live prices like watcher mode
+            // marketTracker will handle logging prices to CSV to avoid conflicts
             const trackerMarket = marketTracker.getMarkets().get(market.marketKey);
             if (trackerMarket) {
                 if (priceUp !== null) trackerMarket.currentPriceUp = priceUp;

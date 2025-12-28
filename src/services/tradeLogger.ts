@@ -338,9 +338,33 @@ class TradeLogger {
             const size = parseFloat(activity.size || '0');
             const usdcSize = parseFloat(activity.usdcSize || '0');
             
-            // Calculate price differences (how much better/worse than market price)
-            const priceDifferenceUp = isUp ? (tradePrice - prices.priceUp) : 0;
-            const priceDifferenceDown = !isUp ? (tradePrice - prices.priceDown) : 0;
+            // Use execution price to determine UP/DOWN prices at execution time
+            // This ensures execution price matches UP/DOWN columns for accurate analysis
+            // The execution price is the most accurate representation of what the market was at that moment
+            // Regular price updates (from marketTracker) will still use API prices for stability
+            let prices: { priceUp: number; priceDown: number };
+            if (tradePrice > 0 && tradePrice <= 1) {
+                if (isUp) {
+                    // UP trade executed at tradePrice, so UP price = tradePrice, DOWN = 1 - tradePrice
+                    prices = {
+                        priceUp: tradePrice,
+                        priceDown: 1.0 - tradePrice
+                    };
+                } else {
+                    // DOWN trade executed at tradePrice, so DOWN price = tradePrice, UP = 1 - tradePrice
+                    prices = {
+                        priceUp: 1.0 - tradePrice,
+                        priceDown: tradePrice
+                    };
+                }
+            } else {
+                // Fallback: fetch prices if tradePrice is invalid
+                prices = await this.fetchMarketPrices(activity.conditionId);
+            }
+            
+            // Price differences are 0 since we use execution price as market price for trades
+            const priceDifferenceUp = 0;
+            const priceDifferenceDown = 0;
             
             // Update and get average costs for this market
             const conditionId = activity.conditionId || '';

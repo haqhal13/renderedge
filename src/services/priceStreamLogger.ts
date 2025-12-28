@@ -297,9 +297,11 @@ class PriceStreamLogger {
         // Get or create pending entry for this market
         let pending = this.pendingEntries.get(marketKey);
         if (!pending) {
+            // If no pending entry exists yet, create one with the passed prices
+            // (This handles the edge case where a trade happens before any price logging)
             pending = {
-                priceUp,
-                priceDown,
+                priceUp: priceUp > 0 ? priceUp : 0.5,
+                priceDown: priceDown > 0 ? priceDown : 0.5,
                 watchTrades: [],
                 paperTrades: [],
                 lastUpdate: timestamp,
@@ -307,39 +309,56 @@ class PriceStreamLogger {
             this.pendingEntries.set(marketKey, pending);
         }
 
-        // Update prices to latest
-        pending.priceUp = priceUp;
-        pending.priceDown = priceDown;
-        pending.lastUpdate = timestamp;
-
         // Add trade to appropriate list if this is a trade entry
+        // For trade entries, update prices with the fetched prices (from tradeLogger)
+        // to ensure we show the current market prices at the time the trade is logged
         if (entryType === 'WATCH' && notes) {
-            // Create unique key for this trade entry to prevent duplicates using transactionHash
-            if (transactionHash) {
-                const tradeEntryKey = `WATCH:${transactionHash}`;
-                if (this.loggedTradeEntries.has(tradeEntryKey)) {
-                    return; // Already logged this trade entry
-                }
-                this.loggedTradeEntries.add(tradeEntryKey);
+            // Update prices to the fetched prices (current market prices when trade was logged)
+            pending.priceUp = priceUp > 0 ? priceUp : pending.priceUp;
+            pending.priceDown = priceDown > 0 ? priceDown : pending.priceDown;
+            pending.lastUpdate = timestamp;
+            // Create unique key for this trade entry to prevent duplicates
+            // Use transactionHash if available, otherwise use marketKey + notes as fallback
+            const tradeEntryKey = transactionHash 
+                ? `WATCH:${transactionHash}` 
+                : `WATCH:${marketKey}:${notes}`;
+            
+            if (this.loggedTradeEntries.has(tradeEntryKey)) {
+                return; // Already logged this trade entry
             }
+            this.loggedTradeEntries.add(tradeEntryKey);
+            
             pending.watchTrades.push(notes);
             // Force a write when trade is logged to ensure it appears in CSV
             this.flushPendingEntry(marketKey, filePath, pending);
             return;
         } else if (entryType === 'PAPER' && notes) {
             // Create unique key for this trade entry to prevent duplicates using transactionHash
-            if (transactionHash) {
-                const tradeEntryKey = `PAPER:${transactionHash}`;
-                if (this.loggedTradeEntries.has(tradeEntryKey)) {
-                    return; // Already logged this trade entry
-                }
-                this.loggedTradeEntries.add(tradeEntryKey);
+            // Paper trades always have transactionHash, but handle missing case for safety
+            const tradeEntryKey = transactionHash 
+                ? `PAPER:${transactionHash}` 
+                : `PAPER:${marketKey}:${notes}`;
+            
+            if (this.loggedTradeEntries.has(tradeEntryKey)) {
+                return; // Already logged this trade entry
             }
+            this.loggedTradeEntries.add(tradeEntryKey);
+            
+            // Update prices to the fetched prices (current market prices when trade was logged)
+            pending.priceUp = priceUp > 0 ? priceUp : pending.priceUp;
+            pending.priceDown = priceDown > 0 ? priceDown : pending.priceDown;
+            pending.lastUpdate = timestamp;
+            
             pending.paperTrades.push(notes);
             // Force a write when trade is logged to ensure it appears in CSV
             this.flushPendingEntry(marketKey, filePath, pending);
             return;
         }
+
+        // For regular price updates (no entryType), update prices to latest
+        pending.priceUp = priceUp;
+        pending.priceDown = priceDown;
+        pending.lastUpdate = timestamp;
 
         // Only write rows for pure price updates (no entryType)
         // This ensures we get regular price snapshots with gaps where no trades happened
@@ -420,7 +439,25 @@ class PriceStreamLogger {
     }
 
     /**
+     * Get current pending prices for a market (returns current live prices from pending entry)
+     */
+    getCurrentPrices(marketSlug: string, marketTitle: string): { priceUp: number; priceDown: number } | null {
+        const { type, timeframe } = extractMarketKey(marketSlug, marketTitle);
+        if (!type || !timeframe) {
+            return null;
+        }
+        const marketKey = `${type}-${timeframe}`;
+        const pending = this.pendingEntries.get(marketKey);
+        if (pending && pending.priceUp > 0 && pending.priceDown > 0) {
+            return { priceUp: pending.priceUp, priceDown: pending.priceDown };
+        }
+        return null;
+    }
+
+    /**
      * Mark a watch mode entry
+     * For trade entries, uses current pending prices (from regular price logging) if available,
+     * otherwise falls back to the passed prices (edge case for first trade before price logging)
      */
     markWatchEntry(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number, notes?: string, transactionHash?: string): void {
         this.logPrice(marketSlug, marketTitle, priceUp, priceDown, 'WATCH', notes, transactionHash);
@@ -428,6 +465,8 @@ class PriceStreamLogger {
 
     /**
      * Mark a paper mode entry
+     * For trade entries, uses current pending prices (from regular price logging) if available,
+     * otherwise falls back to the passed prices (edge case for first trade before price logging)
      */
     markPaperEntry(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number, notes?: string, transactionHash?: string): void {
         this.logPrice(marketSlug, marketTitle, priceUp, priceDown, 'PAPER', notes, transactionHash);
