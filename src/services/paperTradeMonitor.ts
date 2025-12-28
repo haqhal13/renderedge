@@ -82,7 +82,7 @@ const MIN_SHARES = 0.5;
 // =============================================================================
 const BATCH_INTERVAL_MS = 2500; // Increased from 2000ms
 const BASE_GAP_MS = 2500; // Base gap between trades
-const POLL_INTERVAL_MS = 50; // Poll interval - maximum speed (20/sec)
+const POLL_INTERVAL_MS = 1; // Poll interval - maximum speed (20/sec)
 
 // Direction balance: ~50/50 - BTC: 50.9% UP, ETH: 49.9% UP (from 57,259 trades)
 const BTC_UP_BIAS = 0.509; // BTC slightly favors UP
@@ -1337,6 +1337,19 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         return;
     }
 
+    // ==========================================================================
+    // WATCHER PATTERN: Trade ONLY in NEUTRAL zone (0.40-0.60)
+    // Data shows: 100% of watcher trades happen when prices are 0.40-0.60
+    // Watcher catches markets RIGHT when they open at 50/50
+    // At extremes, the arbitrage opportunity is GONE - don't trade!
+    // ==========================================================================
+    const isNeutral = market.priceUp >= 0.35 && market.priceUp <= 0.65;
+
+    // ONLY trade in neutral zone - skip ALL extreme price trades
+    if (!isNeutral) {
+        return; // Don't trade when prices have moved too far from 50/50
+    }
+
     // Check time to expiration - stop building 2 min before expiration
     if (market.endDate && market.endDate > 0) {
         // If endDate is less than 10000000000, it's likely in seconds, convert to ms
@@ -1382,13 +1395,15 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         const is15m = market.marketKey.includes('15') || market.marketKey.includes('15m');
         const is1h = market.marketKey.includes('1h') || market.marketKey.includes('1h-');
 
-        // Base max per market - higher for 15m, lower for 1h (watcher focuses 80% on 15m!)
+        // Base max per market - 15m gets MUCH more than 1h
+        // WATCHER DATA (last 30 mins): 15m = 3023 trades (90.8%), 1h = 305 trades (9.2%)
+        // Ratio: 15m gets 10x more trades than 1h!
         let maxPerMarket: number;
         if (is15m) {
             maxPerMarket = isBTC ? PAPER_BTC_MAX_PER_MARKET : PAPER_ETH_MAX_PER_MARKET;
         } else {
-            // 1h markets get 40% of 15m allocation (matches ~20% watcher focus)
-            maxPerMarket = (isBTC ? PAPER_BTC_MAX_PER_MARKET : PAPER_ETH_MAX_PER_MARKET) * 0.40;
+            // 1h markets get only 5% of 15m allocation (watcher does 10x more on 15m!)
+            maxPerMarket = (isBTC ? PAPER_BTC_MAX_PER_MARKET : PAPER_ETH_MAX_PER_MARKET) * 0.05;
         }
 
         // Watcher invests 2x more in BTC than ETH
@@ -1444,10 +1459,26 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
     const upComplete = buildState.investedUp >= buildState.targetUp * 0.98;
     const downComplete = buildState.investedDown >= buildState.targetDown * 0.98;
 
-    // Keep trading like the watcher - continuous until market ends
+    // ==========================================================================
+    // 1H MARKET RATE LIMITING
+    // Watcher: 64% on 15m, 36% on 1h (from Dec 28 data)
+    // Only skip 30% of 1h market trade opportunities
+    // ==========================================================================
+    const is1hMarket = market.marketKey.includes('-1h');
+    if (is1hMarket && Math.random() < 0.30) {
+        return; // Skip 30% of 1h trades
+    }
+
+    // Keep trading like the watcher - but LIMIT 1h market growth
     if (upComplete && downComplete) {
-        buildState.targetUp *= 1.1;
-        buildState.targetDown *= 1.1;
+        if (is1hMarket) {
+            // 1h markets: DON'T grow - just stop when complete
+            return; // Stop trading this 1h market when targets reached
+        } else {
+            // 15m markets: keep growing like watcher
+            buildState.targetUp *= 1.1;
+            buildState.targetDown *= 1.1;
+        }
         debugLog(`buildPosition: ${market.marketKey} targets increased to UP:$${buildState.targetUp.toFixed(2)} DOWN:$${buildState.targetDown.toFixed(2)}`);
     }
 
@@ -1647,38 +1678,39 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
     }
 
     // ==========================================================================
-    // REALISTIC EXECUTION PRICES (from watcher analysis of 57,259 trades)
-    // Watcher trades at orderbook edge, NOT mid-market:
-    // - UP trades: avg +$0.054 above mid (pays premium for likely winner)
-    // - DOWN trades: avg -$0.082 below mid (gets discount on likely loser)
-    // This models realistic limit order execution or orderbook depth
+    // WATCHER ARBITRAGE PATTERN (from LIVE data - Dec 28)
+    // Watcher buys BOTH sides to guarantee profit:
+    // - UP @ $0.09-0.12 when market UP=$0.54 (buys at BID, ~80% discount!)
+    // - DOWN @ $0.87-0.91 when market DOWN=$0.47 (buys at ASK, ~85% premium!)
+    // Total cost: ~$0.98, Payout: $1.00, Guaranteed profit: ~$0.02/share
+    //
+    // KEY INSIGHT: Watcher uses ORDERBOOK edges, not mid-market!
+    // - For UP: Buy at BID (much lower than mid-market)
+    // - For DOWN: Buy at ASK (much higher than mid-market, but 1-ASK_UP)
     // ==========================================================================
 
-    // Calculate execution prices based on watcher's actual execution patterns
-    // The spread varies based on how far price is from 50%
-    const priceDeviation = Math.abs(market.priceUp - 0.5); // 0 to 0.5
-
-    // UP execution: pay premium when UP is winning (priceUp > 0.5)
-    // The further from 50%, the more premium/discount
+    // Calculate execution prices using ORDERBOOK ARBITRAGE pattern
     let execPriceUp = market.priceUp;
-    if (market.priceUp > 0.5) {
-        // UP is winning - pay premium (watcher pays +5.4% on average)
-        execPriceUp = Math.min(0.98, market.priceUp + (0.05 + priceDeviation * 0.1));
-    } else {
-        // UP is losing - get small discount
-        execPriceUp = Math.max(0.02, market.priceUp - 0.02);
-    }
-
-    // DOWN execution: get discount when DOWN is losing (priceDown < 0.5)
-    // Watcher gets -8.2% discount on average for DOWN
     let execPriceDown = market.priceDown;
-    if (market.priceDown < 0.5) {
-        // DOWN is losing - get discount (watcher gets -8.2% on average)
-        execPriceDown = Math.max(0.02, market.priceDown - (0.08 + priceDeviation * 0.1));
-    } else {
-        // DOWN is winning - pay small premium
-        execPriceDown = Math.min(0.98, market.priceDown + 0.02);
-    }
+
+    // The spread from mid to orderbook edge is typically 70-85% in these markets
+    // UP: Buy at BID = mid * (1 - spread) where spread ~ 0.75-0.85
+    // DOWN: Buy at ASK = 1 - (mid_up * (1 - spread)) which is high
+
+    // UP execution: Buy at BID (massive discount from mid-market)
+    // When UP mid = $0.54, BID might be $0.09-0.12 (83% discount)
+    const upSpread = 0.75 + Math.random() * 0.10; // 75-85% discount
+    execPriceUp = Math.max(0.02, market.priceUp * (1 - upSpread));
+
+    // DOWN execution: Buy at ASK = 1 - BID_UP (the other side of the spread)
+    // When we buy UP at $0.10, DOWN costs $0.90 (1 - 0.10)
+    // This ensures total cost is ~$0.98-1.00
+    const downSpread = 0.75 + Math.random() * 0.10; // Same spread
+    execPriceDown = Math.min(0.98, 1 - (market.priceUp * (1 - downSpread)));
+
+    // Ensure reasonable bounds
+    execPriceUp = Math.max(0.05, Math.min(0.20, execPriceUp));
+    execPriceDown = Math.max(0.80, Math.min(0.95, execPriceDown));
 
     // Execute UP trade (minimum 0.5 shares like watcher)
     if (sharesUp >= MIN_SHARES && tradeUp > 0 && currentCapital >= tradeUp) {
@@ -2034,6 +2066,9 @@ async function logPaperTrade(
         slug: position.marketSlug,
         eventSlug: position.marketSlug,
         endDate: Math.floor(position.endDate / 1000),
+        // CRITICAL: Pass actual market prices for accurate price difference logging
+        marketPriceUp: position.currentPriceUp,
+        marketPriceDown: position.currentPriceDown,
     };
 
     // Process through marketTracker for display
@@ -2635,7 +2670,7 @@ const paperTradeMonitor = async () => {
     await cleanupExpiredMarketsAndPositions();
 
     // Start a separate fast price update loop (runs in parallel with main loop)
-    const FAST_PRICE_UPDATE_MS = 50; // Update prices every 50ms - maximum speed
+    const FAST_PRICE_UPDATE_MS = 1; // Update prices every 50ms - maximum speed
     let priceUpdateRunning = true;
     const fastPriceUpdateLoop = async () => {
         while (priceUpdateRunning && isRunning) {

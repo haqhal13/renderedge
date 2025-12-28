@@ -310,12 +310,15 @@ class TradeLogger {
             const outcome = isUp ? 'UP' : 'DOWN';
             const tradePrice = parseFloat(activity.price || '0');
 
-            // For PAPER trades, use the actual trade price that was passed in
+            // For PAPER trades, use the actual market prices passed in (NOT trade price!)
             // For WATCH trades, fetch current market prices from API
             let prices: { priceUp: number; priceDown: number };
-            if (traderAddress === 'PAPER') {
-                // PAPER trades already have the exact price - use it directly
-                // Calculate complementary price (UP + DOWN = 1.0)
+            if (traderAddress === 'PAPER' && activity.marketPriceUp !== undefined && activity.marketPriceDown !== undefined) {
+                // PAPER trades include actual market prices - use them for accurate comparison
+                // This allows us to see the execution price difference vs mid-market
+                prices = { priceUp: activity.marketPriceUp, priceDown: activity.marketPriceDown };
+            } else if (traderAddress === 'PAPER') {
+                // Fallback for older PAPER trades without market prices
                 if (isUp) {
                     prices = { priceUp: tradePrice, priceDown: 1.0 - tradePrice };
                 } else {
