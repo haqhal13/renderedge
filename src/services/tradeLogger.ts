@@ -4,6 +4,7 @@ import { ENV } from '../config/env';
 import fetchData from '../utils/fetchData';
 import priceStreamLogger from './priceStreamLogger';
 import { getRunId } from '../utils/runId';
+import marketTracker from './marketTracker';
 
 interface TradeLog {
     timestamp: number;
@@ -385,12 +386,10 @@ class TradeLogger {
             const size = parseFloat(activity.size || '0');
             const usdcSize = parseFloat(activity.usdcSize || '0');
             
-            // Use REAL prices for logging - the execution price IS the real market price
-            // The watcher's execution price comes directly from the orderbook at trade time
-            //
-            // PAPER trades pass marketPriceUp/marketPriceDown from the actual orderbook
-            // WATCH trades: Use the EXECUTION PRICE as market price (it's from the real orderbook!)
+            // Fetch EXACT prices from CLOB API for both UP and DOWN
+            // This gives us the real orderbook prices instead of calculating 1 - price
             let prices: { priceUp: number; priceDown: number };
+
             if (activity.marketPriceUp !== undefined && activity.marketPriceDown !== undefined) {
                 // Use actual market prices passed by paper trades
                 prices = {
@@ -398,21 +397,50 @@ class TradeLogger {
                     priceDown: activity.marketPriceDown
                 };
             } else {
-                // For WATCHER trades: The execution price IS the real orderbook price!
-                // Use execution price for the traded side, derive the other from (1 - price)
-                // This is accurate because UP + DOWN always sum to ~$1.00
-                if (isUp) {
-                    // Bought UP at tradePrice, so priceUp = tradePrice, priceDown = 1 - tradePrice
+                // For WATCHER trades: Use prices from marketTracker (already fetched from orderbook)
+                // This is more reliable than fetching again since marketTracker continuously updates prices
+                let foundMarket: any = null;
+
+                // Try to find the market in marketTracker by conditionId or slug
+                const trackerMarkets = marketTracker.getMarkets();
+                for (const [_, market] of trackerMarkets) {
+                    if (market.conditionId === activity.conditionId ||
+                        market.marketSlug === activity.slug) {
+                        foundMarket = market;
+                        break;
+                    }
+                }
+
+                // Use cached prices from marketTracker if available (these are the real orderbook prices)
+                if (foundMarket && foundMarket.currentPriceUp !== undefined && foundMarket.currentPriceDown !== undefined) {
                     prices = {
-                        priceUp: tradePrice,
-                        priceDown: Math.max(0.01, 1.0 - tradePrice)
+                        priceUp: foundMarket.currentPriceUp,
+                        priceDown: foundMarket.currentPriceDown
                     };
                 } else {
-                    // Bought DOWN at tradePrice, so priceDown = tradePrice, priceUp = 1 - tradePrice
-                    prices = {
-                        priceUp: Math.max(0.01, 1.0 - tradePrice),
-                        priceDown: tradePrice
-                    };
+                    // Fallback: Try to fetch from API
+                    const assetUpId = foundMarket?.assetUp;
+                    const assetDownId = foundMarket?.assetDown;
+                    const conditionId = activity.conditionId || '';
+                    const fetchedPrices = await this.fetchMarketPrices(conditionId, assetUpId, assetDownId);
+
+                    // Use fetched prices if valid (not default 0.5/0.5)
+                    if (fetchedPrices.priceUp !== 0.5 || fetchedPrices.priceDown !== 0.5) {
+                        prices = fetchedPrices;
+                    } else {
+                        // Last resort: Use execution price for traded side, calculate other
+                        if (isUp) {
+                            prices = {
+                                priceUp: tradePrice,
+                                priceDown: Math.max(0.01, 1.0 - tradePrice)
+                            };
+                        } else {
+                            prices = {
+                                priceUp: Math.max(0.01, 1.0 - tradePrice),
+                                priceDown: tradePrice
+                            };
+                        }
+                    }
                 }
             }
 
@@ -499,18 +527,10 @@ class TradeLogger {
             // Use EXACT trade timestamp (convert from seconds to ms if needed)
             const tradeTimestampMs = timestamp; // Already in ms from line 382
 
-            // For price stream: use EXECUTION price as the market price
-            // If bought UP at $0.02, show priceUp=$0.02, priceDown=$0.98
-            // This accurately reflects what was available on the orderbook
-            let streamPriceUp: number;
-            let streamPriceDown: number;
-            if (isUp) {
-                streamPriceUp = tradePrice;
-                streamPriceDown = Math.max(0.01, 1.0 - tradePrice);
-            } else {
-                streamPriceDown = tradePrice;
-                streamPriceUp = Math.max(0.01, 1.0 - tradePrice);
-            }
+            // For price stream: use the EXACT fetched prices (same as trade CSV)
+            // This gives actual orderbook prices for both UP and DOWN
+            const streamPriceUp = prices.priceUp;
+            const streamPriceDown = prices.priceDown;
 
             if (entryType === 'PAPER') {
                 priceStreamLogger.markPaperEntry(

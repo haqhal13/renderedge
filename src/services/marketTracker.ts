@@ -1277,7 +1277,32 @@ class MarketTracker {
                 category: category || undefined,
             };
             this.markets.set(marketKey, market);
-            
+
+            // Notify priceStreamLogger that a new market window has started
+            // This enables logging for this market
+            const marketSlugForNotify = market.marketSlug || '';
+            if (marketSlugForNotify) {
+                const is15Min = marketSlugForNotify.includes('updown-15m');
+                const isHourly = marketSlugForNotify.includes('updown-1h') || marketKey.includes('-1h');
+                const isBTC = marketKey.includes('BTC');
+                const type: 'BTC' | 'ETH' = isBTC ? 'BTC' : 'ETH';
+                const timeframe: '15m' | '1h' = is15Min ? '15m' : '1h';
+
+                // Extract window start timestamp from slug
+                let windowStart = 0;
+                if (is15Min) {
+                    const match = marketSlugForNotify.match(/updown-15m-(\d+)/);
+                    if (match) windowStart = parseInt(match[1], 10);
+                } else if (isHourly) {
+                    const match = marketSlugForNotify.match(/updown-1h-(\d+)/);
+                    if (match) windowStart = parseInt(match[1], 10);
+                }
+
+                if (windowStart > 0) {
+                    priceStreamLogger.notifyNewMarketWindow(type, timeframe, windowStart);
+                }
+            }
+
             // Remove previous time window markets when a new one starts
             this.removePreviousTimeWindow(market);
             
@@ -1478,9 +1503,67 @@ class MarketTracker {
     /**
      * Fetch current prices for market assets using order book (most accurate) with fallback to positions
      */
+    /**
+     * Fetch asset IDs from Gamma API if missing
+     */
+    private async fetchAssetIdsIfMissing(market: MarketStats): Promise<boolean> {
+        // Only fetch if we're missing asset IDs and have conditionId or slug
+        if ((market.assetUp && market.assetDown) || (!market.conditionId && !market.marketSlug)) {
+            return false; // Already have assets or no way to fetch them
+        }
+
+        try {
+            // Try fetching by slug first (more reliable for new 15-min markets)
+            if (market.marketSlug) {
+                const slugUrl = `https://gamma-api.polymarket.com/events?slug=${market.marketSlug}`;
+                const data = await fetchData(slugUrl).catch(() => null);
+                if (data && Array.isArray(data) && data.length > 0) {
+                    const event = data[0];
+                    const markets = event.markets || [];
+                    if (markets.length > 0) {
+                        const marketData = markets[0];
+                        const clobTokenIds = marketData.clobTokenIds || [];
+                        if (clobTokenIds.length >= 2) {
+                            const outcomes = marketData.outcomes || ['Up', 'Down'];
+                            const isFirstUp = outcomes[0]?.toLowerCase().includes('up');
+                            market.assetUp = isFirstUp ? clobTokenIds[0] : clobTokenIds[1];
+                            market.assetDown = isFirstUp ? clobTokenIds[1] : clobTokenIds[0];
+                            return true; // Successfully fetched asset IDs
+                        }
+                    }
+                }
+            }
+
+            // Fallback: Fetch from general markets list by conditionId
+            if (market.conditionId) {
+                const gammaUrl = `https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=500`;
+                const marketList = await fetchData(gammaUrl).catch(() => null);
+
+                if (Array.isArray(marketList)) {
+                    const marketData = marketList.find((m: any) => m.condition_id === market.conditionId);
+                    if (marketData && marketData.clobTokenIds && marketData.clobTokenIds.length >= 2) {
+                        const outcomes = marketData.outcomes || ['Up', 'Down'];
+                        const isFirstUp = outcomes[0]?.toLowerCase().includes('up');
+                        market.assetUp = isFirstUp ? marketData.clobTokenIds[0] : marketData.clobTokenIds[1];
+                        market.assetDown = isFirstUp ? marketData.clobTokenIds[1] : marketData.clobTokenIds[0];
+                        return true; // Successfully fetched asset IDs
+                    }
+                }
+            }
+        } catch (e) {
+            // Silently fail - will retry on next update
+        }
+        return false; // Failed to fetch asset IDs
+    }
+
     private async fetchCurrentPricesFromAPI(market: MarketStats): Promise<void> {
         try {
-            // Try order book prices first (most accurate) if we have asset IDs
+            // If asset IDs are missing, try to fetch them first
+            if (!market.assetUp || !market.assetDown) {
+                await this.fetchAssetIdsIfMissing(market);
+            }
+
+            // Try order book prices if we have asset IDs
             if (market.assetUp && market.assetDown) {
                 const [priceUpFromBook, priceDownFromBook] = await Promise.all([
                     this.fetchOrderBookPrice(market.assetUp),
@@ -1488,49 +1571,19 @@ class MarketTracker {
                 ]);
 
                 if (priceUpFromBook !== null && priceDownFromBook !== null) {
-                    // Normalize prices to ensure they sum to 1.0 (should already be close, but ensure accuracy)
-                    const total = priceUpFromBook + priceDownFromBook;
-                    if (total > 0 && Math.abs(total - 1.0) > 0.01) {
-                        market.currentPriceUp = priceUpFromBook / total;
-                        market.currentPriceDown = priceDownFromBook / total;
-                    } else {
-                        market.currentPriceUp = priceUpFromBook;
-                        market.currentPriceDown = priceDownFromBook;
-                    }
+                    // Use orderbook prices directly without normalization to match paper mode
+                    // Normalization causes price jumps when orderbook prices don't sum exactly to 1.0
+                    // Paper mode uses raw orderbook prices, so watch mode should too for consistency
+                    market.currentPriceUp = priceUpFromBook;
+                    market.currentPriceDown = priceDownFromBook;
                     market.lastPriceUpdate = Date.now();
                     return; // Successfully got prices from order book
                 }
             }
 
-            // Fallback: Fetch from positions of tracked traders
-            const positionPromises = ENV.USER_ADDRESSES.map(traderAddress =>
-                fetchData(`https://data-api.polymarket.com/positions?user=${traderAddress}`)
-                    .catch(() => null)
-            );
-
-            const results = await Promise.allSettled(positionPromises);
-
-            for (const result of results) {
-                if (result.status === 'fulfilled' && Array.isArray(result.value)) {
-                    const positions = result.value;
-                    for (const pos of positions) {
-                        // Match by asset ID - fallback method
-                        if (market.assetUp && pos.asset === market.assetUp && pos.curPrice !== undefined && pos.curPrice !== null) {
-                            const price = parseFloat(pos.curPrice);
-                            if (!isNaN(price) && price > 0 && price <= 1) {
-                                market.currentPriceUp = price;
-                            }
-                        }
-                        if (market.assetDown && pos.asset === market.assetDown && pos.curPrice !== undefined && pos.curPrice !== null) {
-                            const price = parseFloat(pos.curPrice);
-                            if (!isNaN(price) && price > 0 && price <= 1) {
-                                market.currentPriceDown = price;
-                            }
-                        }
-                    }
-                }
-            }
-
+            // No fallback - only use orderbook prices for consistency with paper mode
+            // Fallback to positions API was causing price instability and jumps
+            // If orderbook prices aren't available, keep existing prices rather than using stale fallback data
             market.lastPriceUpdate = Date.now();
         } catch (e) {
             // Silently fail - will retry on next update
@@ -1544,8 +1597,11 @@ class MarketTracker {
     private async fetchCurrentPrices(market: MarketStats): Promise<void> {
         const now = Date.now();
 
-        // Fetch from API every 1-2 seconds for live prices (aggressive but necessary for accuracy)
-        const shouldFetchFromAPI = !market.lastPriceUpdate || (now - market.lastPriceUpdate >= 1000);
+        // Always fetch if we don't have prices yet, otherwise throttle to 500ms
+        // This ensures prices appear immediately when markets are discovered
+        const hasNoPrices = !market.currentPriceUp || !market.currentPriceDown;
+        const isStale = !market.lastPriceUpdate || (now - market.lastPriceUpdate >= 500);
+        const shouldFetchFromAPI = hasNoPrices || isStale;
 
         if (shouldFetchFromAPI) {
             await this.fetchCurrentPricesFromAPI(market);
@@ -1733,7 +1789,8 @@ class MarketTracker {
             return; // Lock will be released in finally block
         }
 
-        // Fetch current prices for all active markets (in parallel, but limit concurrency)
+        // Fetch current prices for all active markets (in parallel)
+        // fetchCurrentPrices will handle throttling and force fetch if prices are missing
         const pricePromises = activeMarkets.map(m => this.fetchCurrentPrices(m));
         await Promise.allSettled(pricePromises);
 
@@ -2602,6 +2659,25 @@ class MarketTracker {
 
                 this.markets.set(marketKey, newMarket);
                 this.discoveredSlugs.add(slug);
+
+                // Notify priceStreamLogger that a new market window has started
+                const isBTC = marketKey.includes('BTC');
+                const type: 'BTC' | 'ETH' = isBTC ? 'BTC' : 'ETH';
+                const timeframe: '15m' | '1h' = is15Min ? '15m' : '1h';
+
+                // Extract window start timestamp from slug
+                let windowStart = 0;
+                if (is15Min) {
+                    const match = slug.match(/updown-15m-(\d+)/);
+                    if (match) windowStart = parseInt(match[1], 10);
+                } else {
+                    const match = slug.match(/updown-1h-(\d+)/);
+                    if (match) windowStart = parseInt(match[1], 10);
+                }
+
+                if (windowStart > 0) {
+                    priceStreamLogger.notifyNewMarketWindow(type, timeframe, windowStart);
+                }
 
                 // Force display update
                 this.lastDisplayTime = 0;

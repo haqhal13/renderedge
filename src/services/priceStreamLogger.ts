@@ -78,6 +78,12 @@ class PriceStreamLogger {
     private loggedTradeEntries: Set<string> = new Set();
     // Track last logged timestamp per market (to avoid duplicate rows at same ms)
     private lastLoggedTimestamp: Map<string, number> = new Map();
+    // Track current market window start times - only log when we've seen a new market
+    // Key: "BTC-15m", "ETH-15m", "BTC-1h", "ETH-1h"
+    // Value: Unix timestamp (seconds) of the current market window start
+    private currentMarketWindow: Map<string, number> = new Map();
+    // Track if logging is enabled for each market (enabled when new market window starts)
+    private loggingEnabled: Map<string, boolean> = new Map();
 
     constructor() {
         const logsDir = path.join(process.cwd(), 'logs');
@@ -216,15 +222,58 @@ class PriceStreamLogger {
     }
 
     /**
+     * Notify that a new market window has started
+     * This enables logging for that market and clears old data tracking
+     * @param type - 'BTC' or 'ETH'
+     * @param timeframe - '15m' or '1h'
+     * @param windowStartTimestamp - Unix timestamp (seconds) of the market window start
+     */
+    notifyNewMarketWindow(type: 'BTC' | 'ETH', timeframe: '15m' | '1h', windowStartTimestamp: number): void {
+        const marketKey = `${type}-${timeframe}`;
+        const currentWindow = this.currentMarketWindow.get(marketKey);
+
+        // Only update if this is a NEW window (different timestamp)
+        if (currentWindow !== windowStartTimestamp) {
+            this.currentMarketWindow.set(marketKey, windowStartTimestamp);
+            this.loggingEnabled.set(marketKey, true);
+
+            // Clear old logged entries for this market to allow fresh logging
+            const prefix = `${type}-${timeframe}`;
+            for (const key of this.loggedTradeEntries) {
+                if (key.includes(prefix)) {
+                    this.loggedTradeEntries.delete(key);
+                }
+            }
+
+            console.log(`📊 Price logging enabled for ${marketKey} (window: ${new Date(windowStartTimestamp * 1000).toISOString()})`);
+        }
+    }
+
+    /**
+     * Check if logging is enabled for a market
+     */
+    isLoggingEnabled(type: 'BTC' | 'ETH', timeframe: '15m' | '1h'): boolean {
+        const marketKey = `${type}-${timeframe}`;
+        return this.loggingEnabled.get(marketKey) || false;
+    }
+
+    /**
      * Log price update - writes immediately with current timestamp
      * Called frequently to capture real-time price movements
+     * Only logs if a new market window has been notified
      */
     logPrice(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number): void {
         const { type, timeframe } = extractMarketKey(marketSlug, marketTitle);
         if (!type || !timeframe) return;
 
-        const timestamp = Date.now();
         const marketKey = `${type}-${timeframe}`;
+
+        // Only log if logging is enabled for this market (new window has started)
+        if (!this.loggingEnabled.get(marketKey)) {
+            return;
+        }
+
+        const timestamp = Date.now();
         const filePath = this.getFilePath(type, timeframe);
 
         // Only write if timestamp is different from last (avoid duplicate ms rows)
@@ -258,6 +307,13 @@ class PriceStreamLogger {
     ): void {
         const { type, timeframe } = extractMarketKey(marketSlug, marketTitle);
         if (!type || !timeframe) return;
+
+        const marketKey = `${type}-${timeframe}`;
+
+        // Only log if logging is enabled for this market (new window has started)
+        if (!this.loggingEnabled.get(marketKey)) {
+            return;
+        }
 
         // Prevent duplicate entries
         const tradeKey = transactionHash
@@ -297,6 +353,13 @@ class PriceStreamLogger {
     ): void {
         const { type, timeframe } = extractMarketKey(marketSlug, marketTitle);
         if (!type || !timeframe) return;
+
+        const marketKey = `${type}-${timeframe}`;
+
+        // Only log if logging is enabled for this market (new window has started)
+        if (!this.loggingEnabled.get(marketKey)) {
+            return;
+        }
 
         const tradeKey = transactionHash
             ? `PAPER:${transactionHash}`

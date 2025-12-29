@@ -48,19 +48,20 @@ const PAPER_BTC_MAX_PER_MARKET = parseFloat(process.env.PAPER_BTC_MAX_PER_MARKET
 const PAPER_ETH_MAX_PER_MARKET = parseFloat(process.env.PAPER_ETH_MAX_PER_MARKET || '2400');
 
 // =============================================================================
-// THE SECRET SAUCE: EXACT WATCHER SHARE DISTRIBUTIONS (Dec 27-28 - 57,259 trades!)
-// KEY INSIGHT: 22 shares is #1 for BTC at 18.8%! ETH 12 shares at 40.9%!
-// BTC 15m: 22(18.8%), 5(12.5%), 1(6.8%), 2(6.7%), 21(5.5%)
-// ETH 15m: 12(40.9%!), 11(10.7%), 10(8.1%), 8(6.0%), 5(5.8%)
+// THE SECRET SAUCE: EXACT WATCHER SHARE DISTRIBUTIONS (Dec 29 - 2,752 trades!)
+// KEY INSIGHT: 25 shares is #1 at 21.7%! followed by 5 shares at 12.4%!
+// BTC 15m: 25(21.7%), 5(12.4%), 2(7.1%), 24(6.3%), 1(4.8%), 15(4.0%), 10(3.9%)
+// Average share size: 13.91, Range: 0.01 - 25.00
+// UP/DOWN bias: 49.4% UP / 50.6% DOWN (nearly perfect 50/50)
 // =============================================================================
-// BTC 15-min share distribution (32,166 trades analyzed - Dec 27-28)
-// 22 shares dominates at 18.8%, followed by 5 shares at 12.5%
-const BTC_15M_SHARE_AMOUNTS = [22, 5, 1, 2, 21, 20, 10, 3, 6, 19, 4, 7, 8, 16, 17];
-const BTC_15M_SHARE_WEIGHTS = [18.8, 12.5, 6.8, 6.7, 5.5, 4.6, 4.3, 3.9, 3.8, 3.1, 3.0, 2.8, 2.7, 2.7, 2.5];
+// BTC 15-min share distribution (2,752 trades analyzed - Dec 29)
+// 25 shares dominates at 21.7%, followed by 5 shares at 12.4%
+const BTC_15M_SHARE_AMOUNTS = [25, 5, 2, 24, 1, 15, 10, 3, 23, 22, 6, 12, 4, 7, 14];
+const BTC_15M_SHARE_WEIGHTS = [21.7, 12.4, 7.1, 6.3, 4.8, 4.0, 3.9, 3.7, 3.6, 3.2, 3.0, 2.8, 2.6, 2.5, 2.4];
 
-// ETH 15-min share distribution (13,530 trades analyzed) - 12 shares DOMINATES at 40.9%!
-const ETH_15M_SHARE_AMOUNTS = [12, 11, 10, 8, 5, 9, 2, 7, 6, 1, 3, 4];
-const ETH_15M_SHARE_WEIGHTS = [40.9, 10.7, 8.1, 6.0, 5.8, 5.3, 4.8, 4.5, 4.2, 3.4, 2.9, 2.6];
+// ETH 15-min share distribution (using same as BTC for now - both follow similar patterns)
+const ETH_15M_SHARE_AMOUNTS = [25, 5, 2, 24, 1, 15, 10, 3, 23, 22, 6, 12];
+const ETH_15M_SHARE_WEIGHTS = [21.7, 12.4, 7.1, 6.3, 4.8, 4.0, 3.9, 3.7, 3.6, 3.2, 3.0, 2.8];
 
 // 1-hour market share distribution (BTC 6,354 trades, ETH 5,209 trades)
 // BTC 1h: 16 shares dominates at 24%, ETH 1h: 10 shares dominates at 41.4%
@@ -76,20 +77,25 @@ const SHARE_WEIGHTS = BTC_15M_SHARE_WEIGHTS;
 const MIN_SHARES = 0.5;
 
 // =============================================================================
-// TIMING PATTERNS (from Dec 27-28 - 57,259 trades analysis)
-// CRITICAL: 72.6% at 2-3s, 13.7% at 4-5s, 8.5% at 5-10s
-// Average gap: 3.56s, Median gap: 2.00s
-// No trades in 0-1s, 1-2s, or 3-4s buckets - watcher uses discrete intervals
+// TIMING PATTERNS (from Dec 29 - 3,018 trades deep analysis)
+// Gap distribution: 61% at 2-3s, 14% at 3-5s, 15% at 5-10s, 9% at 10-30s
+// Avg gap: 4.65s, Median gap: 2s
+// Avg trades per active minute: 34 trades
 // =============================================================================
-const BATCH_INTERVAL_MS = 2500; // Increased from 2000ms
-const BASE_GAP_MS = 2500; // Base gap between trades
-const POLL_INTERVAL_MS = 1; // Poll interval - maximum speed (20/sec)
+const BATCH_INTERVAL_MS = 2000; // Median gap (61% of trades at 2-3s)
+const BASE_GAP_MS = 2000; // Base gap between individual trades
+const POLL_INTERVAL_MS = 1; // Poll interval - maximum speed
 
-// Direction balance: ~50/50 - BTC: 50.9% UP, ETH: 49.9% UP (from 57,259 trades)
-const BTC_UP_BIAS = 0.509; // BTC slightly favors UP
-const ETH_UP_BIAS = 0.499; // ETH is truly 50/50
-const UP_BIAS = 0.504; // Overall average
-const DIRECTION_VARIANCE = 0.01;
+// SEQUENCE PATTERN: 71.4% of trades follow same side as previous!
+// Avg streak length: 3.49 trades of same side in a row
+const SAME_SIDE_PROBABILITY = 0.714; // 71.4% chance to repeat same side
+const AVG_STREAK_LENGTH = 3.5; // Average trades before switching sides
+
+// Direction balance: Pure 50/50 strategy (watcher shows 49.4/50.6 - essentially 50/50)
+const BTC_UP_BIAS = 0.50; // Pure 50/50
+const ETH_UP_BIAS = 0.50; // Pure 50/50
+const UP_BIAS = 0.50; // Pure 50/50
+const DIRECTION_VARIANCE = 0.0; // No variance - strict 50/50
 
 // BTC vs ETH allocation: 67.3% BTC, 32.7% ETH (from 57,259 trades)
 const BTC_ALLOCATION_RATIO = 0.673;
@@ -214,8 +220,29 @@ interface PositionBuildState {
     initialPriceDown: number;
     lastRebalanceTime: number; // Last time we checked for rebalancing
     momentumBias: number;      // Current momentum bias (-1 to +1, positive = favoring UP)
+    // SEQUENCE PATTERN - 71.4% of trades follow same side as previous
+    lastTradeSide: 'UP' | 'DOWN' | null; // Track last trade side for sequence pattern
+    currentStreakLength: number;  // Current streak of same-side trades
 }
 const buildingPositions = new Map<string, PositionBuildState>();
+
+/**
+ * Convert timestamp to milliseconds (handles both seconds and milliseconds format)
+ * Unix timestamps in seconds are < 10 billion, milliseconds are > 1 trillion
+ */
+function toMs(timestamp: number | undefined): number {
+    if (!timestamp || timestamp === 0) return 0;
+    return timestamp < 10000000000 ? timestamp * 1000 : timestamp;
+}
+
+/**
+ * Check if market is still active (endDate not passed or no endDate)
+ */
+function isMarketActive(endDate: number | undefined, now: number = Date.now()): boolean {
+    if (!endDate || endDate === 0) return true;
+    const endDateMs = toMs(endDate);
+    return endDateMs > now;
+}
 
 /**
  * Fetch order book mid-price for an asset
@@ -544,10 +571,10 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
 
     // ALWAYS try to have next markets ready (not just in pre-fetch window)
     const haveNextBTC = Array.from(discoveredMarkets.values()).some(m =>
-        m.marketSlug === nextBtcSlug && m.endDate && m.endDate > now
+        m.marketSlug === nextBtcSlug && isMarketActive(m.endDate, now)
     );
     const haveNextETH = Array.from(discoveredMarkets.values()).some(m =>
-        m.marketSlug === nextEthSlug && m.endDate && m.endDate > now
+        m.marketSlug === nextEthSlug && isMarketActive(m.endDate, now)
     );
 
     // If we don't have next markets and we're within pre-fetch window, force fetch
@@ -582,10 +609,10 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
 
     // FORCE: Check if we're missing any active 15-min markets and force re-fetch
     const have15mBTC = Array.from(discoveredMarkets.values()).some(m =>
-        m.marketKey === 'BTC-UpDown-15' && m.endDate && m.endDate > now
+        m.marketKey === 'BTC-UpDown-15' && isMarketActive(m.endDate, now)
     );
     const have15mETH = Array.from(discoveredMarkets.values()).some(m =>
-        m.marketKey === 'ETH-UpDown-15' && m.endDate && m.endDate > now
+        m.marketKey === 'ETH-UpDown-15' && isMarketActive(m.endDate, now)
     );
 
     // Log what's missing and force retry
@@ -600,10 +627,10 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
 
     // Same for hourly markets
     const have1hBTC = Array.from(discoveredMarkets.values()).some(m =>
-        m.marketKey.startsWith('BTC-UpDown-1h') && m.endDate && m.endDate > now
+        m.marketKey.startsWith('BTC-UpDown-1h') && isMarketActive(m.endDate, now)
     );
     const have1hETH = Array.from(discoveredMarkets.values()).some(m =>
-        m.marketKey.startsWith('ETH-UpDown-1h') && m.endDate && m.endDate > now
+        m.marketKey.startsWith('ETH-UpDown-1h') && isMarketActive(m.endDate, now)
     );
 
     // Format hour for slug (needed early for force re-fetch)
@@ -644,7 +671,7 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
         // Check if we already have this market by slug
         let alreadyHave = false;
         for (const [_, market] of discoveredMarkets.entries()) {
-            if (market.marketSlug === slug && market.endDate && market.endDate > now) {
+            if (market.marketSlug === slug && isMarketActive(market.endDate, now)) {
                 alreadyHave = true;
                 break;
             }
@@ -772,8 +799,9 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
                     }
                 }
 
-                // Skip if expired
-                if (endDate && endDate < now - 60000) return;
+                // Skip if expired (convert to ms if in seconds)
+                const endDateMs = toMs(endDate);
+                if (endDateMs > 0 && endDateMs < now - 60000) return;
 
                 // Get market title and key
                 const title = market.question || event.title || slug;
@@ -828,10 +856,10 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
     // try search API which might find them before slug is fully indexed
     // ==========================================================================
     const stillMissingBTC15m = !Array.from(discoveredMarkets.values()).some(m =>
-        m.marketKey === 'BTC-UpDown-15' && m.endDate && m.endDate > now
+        m.marketKey === 'BTC-UpDown-15' && isMarketActive(m.endDate, now)
     );
     const stillMissingETH15m = !Array.from(discoveredMarkets.values()).some(m =>
-        m.marketKey === 'ETH-UpDown-15' && m.endDate && m.endDate > now
+        m.marketKey === 'ETH-UpDown-15' && isMarketActive(m.endDate, now)
     );
 
     if (stillMissingBTC15m || stillMissingETH15m) {
@@ -891,8 +919,9 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
                             endDate = startTime + (15 * 60 * 1000);
                         }
 
-                        // Skip if expired
-                        if (endDate && endDate < now) continue;
+                        // Skip if expired (convert to ms if in seconds)
+                        const endDateMsCheck = toMs(endDate);
+                        if (endDateMsCheck > 0 && endDateMsCheck < now) continue;
 
                         const marketKey = isBTC15m ? 'BTC-UpDown-15' : 'ETH-UpDown-15';
                         const newMarket = {
@@ -1058,8 +1087,9 @@ async function discoverMarketsFromWatchers(): Promise<void> {
 
         // Skip expired markets (but be lenient - only skip if expired by more than 1 minute)
         // Also skip check if endDate is not set (0 or undefined) - we'll still track these
-        if (market.endDate && market.endDate > 0 && market.endDate < now - 60000) {
-            debugLog(`Skipping expired market: ${marketKey} (ended ${new Date(market.endDate).toISOString()})`);
+        const marketEndMs = toMs(market.endDate);
+        if (marketEndMs > 0 && marketEndMs < now - 60000) {
+            debugLog(`Skipping expired market: ${marketKey} (ended ${new Date(marketEndMs).toISOString()})`);
             continue;
         }
 
@@ -1170,8 +1200,9 @@ async function discoverMarketsFromWatchers(): Promise<void> {
     }
 
     for (const [conditionId, market] of discoveredMarkets.entries()) {
-        // Remove if expired
-        if (market.endDate && market.endDate < now - 60000) {
+        // Remove if expired (convert to ms if needed)
+        const marketExpireMs = toMs(market.endDate);
+        if (marketExpireMs > 0 && marketExpireMs < now - 60000) {
             debugLog(`Removing expired market from discoveredMarkets: ${market.marketKey} (${conditionId})`);
             discoveredMarkets.delete(conditionId);
             continue;
@@ -1214,8 +1245,9 @@ async function cleanupExpiredMarketsAndPositions(): Promise<void> {
         }
 
         // Only clean up if endDate is set AND has passed by more than 1 minute
-        if (position.endDate && position.endDate > 0 && position.endDate < now - EXPIRED_THRESHOLD_MS) {
-            debugLog(`CLEANUP: Removing expired position for ${position.marketKey} (ended ${new Date(position.endDate).toISOString()})`);
+        const posEndDateMs = toMs(position.endDate);
+        if (posEndDateMs > 0 && posEndDateMs < now - EXPIRED_THRESHOLD_MS) {
+            debugLog(`CLEANUP: Removing expired position for ${position.marketKey} (ended ${new Date(posEndDateMs).toISOString()})`);
             // Reclaim capital
             currentCapital += position.costUp + position.costDown;
             positions.delete(conditionId);
@@ -1236,8 +1268,9 @@ async function cleanupExpiredMarketsAndPositions(): Promise<void> {
         }
 
         // Remove if market has expired
-        if (market.endDate && market.endDate > 0 && market.endDate < now - EXPIRED_THRESHOLD_MS) {
-            debugLog(`CLEANUP: Removing expired building position for ${buildState.marketKey}`);
+        const marketEndDateMs = toMs(market.endDate);
+        if (marketEndDateMs > 0 && marketEndDateMs < now - EXPIRED_THRESHOLD_MS) {
+            debugLog(`CLEANUP: Removing expired building position for ${buildState.marketKey} (ended ${new Date(marketEndDateMs).toISOString()})`);
             // Reclaim capital - assume we made our money back at settlement
             currentCapital += buildState.investedUp + buildState.investedDown;
             buildingPositions.delete(conditionId);
@@ -1246,15 +1279,19 @@ async function cleanupExpiredMarketsAndPositions(): Promise<void> {
 
     // Clean up expired discovered markets
     for (const [conditionId, market] of discoveredMarkets.entries()) {
-        if (market.endDate && market.endDate < now - EXPIRED_THRESHOLD_MS) {
-            debugLog(`CLEANUP: Removing expired market ${market.marketKey} (${conditionId})`);
+        const marketEndDateMs = toMs(market.endDate);
+        if (marketEndDateMs > 0 && marketEndDateMs < now - EXPIRED_THRESHOLD_MS) {
+            debugLog(`CLEANUP: Removing expired market ${market.marketKey} (${conditionId.slice(0,16)}...) ended ${new Date(marketEndDateMs).toISOString()}`);
             discoveredMarkets.delete(conditionId);
             proactivelyDiscoveredIds.delete(conditionId);
         }
     }
 
     // Log current state
-    const activeMarkets = Array.from(discoveredMarkets.values()).filter(m => !m.endDate || m.endDate > now);
+    const activeMarkets = Array.from(discoveredMarkets.values()).filter(m => {
+        const endMs = toMs(m.endDate);
+        return !endMs || endMs > now;
+    });
     const activePositions = Array.from(positions.values()).filter(p => !p.isSettled);
 
     debugLog(`CLEANUP: Done. Markets: ${discoveredMarkets.size}, BuildingPos: ${buildingPositions.size}, Positions: ${positions.size}, Capital: $${currentCapital.toFixed(2)}`);
@@ -1275,23 +1312,61 @@ async function updatePrices(): Promise<void> {
     const now = Date.now();
 
     // Filter markets that have both assets and are not expired
-    // If endDate is 0/undefined, we still update prices
+    // Handle both seconds and milliseconds for endDate
     const marketsToUpdate = Array.from(discoveredMarkets.values())
-        .filter(m => m.assetUp && m.assetDown && (!m.endDate || m.endDate > now));
+        .filter(m => {
+            if (!m.assetUp || !m.assetDown) return false;
+            if (!m.endDate || m.endDate === 0) return true; // Unknown endDate, try to update
+            const endDateMs = m.endDate < 10000000000 ? m.endDate * 1000 : m.endDate;
+            return endDateMs > now;
+        });
 
     // Update in parallel batches - larger batch for faster updates
     const batchSize = 10;
     for (let i = 0; i < marketsToUpdate.length; i += batchSize) {
         const batch = marketsToUpdate.slice(i, i + batchSize);
         await Promise.all(batch.map(async (market) => {
+            // CRITICAL: Use marketTracker's asset IDs if available (watcher mode is accurate)
+            // Paper mode's own asset IDs might be wrong, especially for 15-minute markets
+            const trackerMarket = marketTracker.getMarkets().get(market.marketKey);
+            const assetUpToUse = trackerMarket?.assetUp || market.assetUp;
+            const assetDownToUse = trackerMarket?.assetDown || market.assetDown;
+
+            // Skip if we don't have valid asset IDs
+            if (!assetUpToUse || !assetDownToUse) {
+                debugLog(`⚠️ SKIP PRICE UPDATE ${market.marketKey}: missing asset IDs (tracker: ${trackerMarket ? 'YES' : 'NO'}, paper: UP=${market.assetUp ? 'YES' : 'NO'} DOWN=${market.assetDown ? 'YES' : 'NO'})`);
+                return;
+            }
+
             const [priceUp, priceDown] = await Promise.all([
-                getOrderBookPrice(market.assetUp),
-                getOrderBookPrice(market.assetDown)
+                getOrderBookPrice(assetUpToUse),
+                getOrderBookPrice(assetDownToUse)
             ]);
+
+            // DEBUG: Log price updates per market to detect mixing
+            if (priceUp !== null && priceDown !== null) {
+                debugLog(`💰 PRICE UPDATE ${market.marketKey}: UP=$${priceUp.toFixed(4)} DOWN=$${priceDown.toFixed(4)} | AssetUp=${assetUpToUse?.slice(0,12)}... AssetDown=${assetDownToUse?.slice(0,12)}... (from tracker: ${trackerMarket ? 'YES' : 'NO'})`);
+            } else if (priceUp === null || priceDown === null) {
+                // If API returns null, market may be expired - mark for cleanup
+                debugLog(`⚠️ PRICE NULL ${market.marketKey}: UP=${priceUp} DOWN=${priceDown} - market may be expired`);
+                return; // Skip updating this market's prices
+            }
 
             if (priceUp !== null) market.priceUp = priceUp;
             if (priceDown !== null) market.priceDown = priceDown;
             market.lastUpdate = now;
+
+            // Update paper mode's asset IDs to match marketTracker (if different)
+            if (trackerMarket) {
+                if (trackerMarket.assetUp && trackerMarket.assetUp !== market.assetUp) {
+                    market.assetUp = trackerMarket.assetUp;
+                    debugLog(`🔄 SYNC ASSET UP ${market.marketKey}: updated from tracker`);
+                }
+                if (trackerMarket.assetDown && trackerMarket.assetDown !== market.assetDown) {
+                    market.assetDown = trackerMarket.assetDown;
+                    debugLog(`🔄 SYNC ASSET DOWN ${market.marketKey}: updated from tracker`);
+                }
+            }
 
             // Also update position prices if we have one
             const position = positions.get(market.conditionId);
@@ -1302,15 +1377,16 @@ async function updatePrices(): Promise<void> {
 
             // CRITICAL: Sync prices AND assets to marketTracker for dashboard display
             // This ensures the dashboard shows live prices like watcher mode
-            // marketTracker will handle logging prices to CSV to avoid conflicts
-            const trackerMarket = marketTracker.getMarkets().get(market.marketKey);
-            if (trackerMarket) {
-                if (priceUp !== null) trackerMarket.currentPriceUp = priceUp;
-                if (priceDown !== null) trackerMarket.currentPriceDown = priceDown;
+            // Use raw orderbook prices without normalization to match watch mode (prevents price jumps)
+            if (trackerMarket && priceUp !== null && priceDown !== null) {
+                // Use raw orderbook prices directly (no normalization) to match watch mode behavior
+                // Normalization was causing price jumps when prices don't sum exactly to 1.0
+                trackerMarket.currentPriceUp = priceUp;
+                trackerMarket.currentPriceDown = priceDown;
                 trackerMarket.lastPriceUpdate = now;
-                // Also ensure assets are synced
-                if (market.assetUp) trackerMarket.assetUp = market.assetUp;
-                if (market.assetDown) trackerMarket.assetDown = market.assetDown;
+                // Ensure assets are synced (use tracker's assets as source of truth)
+                if (assetUpToUse) trackerMarket.assetUp = assetUpToUse;
+                if (assetDownToUse) trackerMarket.assetDown = assetDownToUse;
             }
         }));
     }
@@ -1489,6 +1565,9 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
             initialPriceDown: market.priceDown,
             lastRebalanceTime: now,
             momentumBias: 0, // Start neutral
+            // SEQUENCE PATTERN - 71.4% same side follows previous
+            lastTradeSide: null, // No previous trade yet
+            currentStreakLength: 0,
         };
         buildingPositions.set(positionKey, buildState);
 
@@ -1645,29 +1724,51 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
             tradeUp = sharesUp * market.priceUp;
             tradeDown = sharesDown * market.priceDown;
         } else {
-            // Trade single side - MOMENTUM-WEIGHTED direction choice
-            // Watcher chases the winning side more often
+            // ==========================================================
+            // SEQUENCE PATTERN: 71.4% of trades follow same side!
+            // Watcher trades in STREAKS - avg 3.5 trades of same side
+            // ==========================================================
             let preferUp: boolean;
 
-            // Base probability starts at 50%
-            let upProbability = 0.50;
-
-            // Adjust by momentum bias (up to ±20% swing)
-            upProbability += buildState.momentumBias * 0.20;
-
-            // Also consider progress (catch up if behind)
-            if (Math.abs(upProgress - downProgress) >= 0.05) {
-                // If significantly behind on one side, increase its probability
-                if (upProgress < downProgress) {
-                    upProbability += 0.10; // Favor UP to catch up
+            if (buildState.lastTradeSide === null) {
+                // First trade - use contrarian bias based on price
+                // When UP is cheap (<$0.40), buy UP 64% of time
+                // When DOWN is cheap (<$0.40), buy DOWN 64% of time
+                if (market.priceUp < 0.40) {
+                    preferUp = Math.random() < 0.64; // Buy cheap UP
+                } else if (market.priceDown < 0.40) {
+                    preferUp = Math.random() < 0.36; // Buy cheap DOWN (64% DOWN)
                 } else {
-                    upProbability -= 0.10; // Favor DOWN to catch up
+                    preferUp = Math.random() < 0.50; // Neutral 50/50
+                }
+            } else {
+                // SEQUENCE PATTERN: 71.4% chance to repeat same side
+                const repeatSameSide = Math.random() < SAME_SIDE_PROBABILITY;
+
+                if (repeatSameSide) {
+                    // Continue the streak
+                    preferUp = buildState.lastTradeSide === 'UP';
+                } else {
+                    // Switch sides - apply contrarian bias
+                    if (market.priceUp < 0.40) {
+                        preferUp = true; // Buy cheap UP
+                    } else if (market.priceDown < 0.40) {
+                        preferUp = false; // Buy cheap DOWN
+                    } else {
+                        // Neutral - just flip from previous
+                        preferUp = buildState.lastTradeSide === 'DOWN';
+                    }
                 }
             }
 
-            // Clamp probability
-            upProbability = Math.max(0.30, Math.min(0.70, upProbability));
-            preferUp = Math.random() < upProbability;
+            // Also consider progress (catch up if WAY behind - >15% difference)
+            if (Math.abs(upProgress - downProgress) >= 0.15) {
+                if (upProgress < downProgress) {
+                    preferUp = true; // Must catch up UP
+                } else {
+                    preferUp = false; // Must catch up DOWN
+                }
+            }
 
             if (preferUp) {
                 sharesUp = selectTargetShares();
@@ -1778,6 +1879,10 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         };
         await logPaperTrade(tempPos, 'UP', 'BUY', sharesUp, execTradeUp, execPriceUp);
 
+        // Track last trade side for sequence pattern
+        buildState.lastTradeSide = 'UP';
+        buildState.currentStreakLength = buildState.lastTradeSide === 'UP' ? buildState.currentStreakLength + 1 : 1;
+
         debugLog(`buildPosition: ${market.marketKey} UP trade #${buildState.tradeCount}: ${sharesUp.toFixed(1)} shares @ ${execPriceUp.toFixed(4)} = $${execTradeUp.toFixed(2)}`);
     }
 
@@ -1812,25 +1917,28 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         };
         await logPaperTrade(tempPos, 'DOWN', 'BUY', sharesDown, execTradeDown, execPriceDown);
 
+        // Track last trade side for sequence pattern
+        buildState.lastTradeSide = 'DOWN';
+        buildState.currentStreakLength = buildState.lastTradeSide === 'DOWN' ? buildState.currentStreakLength + 1 : 1;
+
         debugLog(`buildPosition: ${market.marketKey} DOWN trade #${buildState.tradeCount}: ${sharesDown.toFixed(1)} shares @ ${execPriceDown.toFixed(4)} = $${execTradeDown.toFixed(2)}`);
     }
 
     // Set next trade time based on EXACT watcher gap distribution
-    // Dec 27-28 - 57,259 trades: 72.6% at 2-3s, 13.7% at 4-5s, 8.5% at 5-10s
-    // Average: 3.56s, Median: 2.00s
-    // NOTE: No trades in 0-1s, 1-2s, or 3-4s - watcher uses discrete intervals
+    // Dec 29 - 3,018 trades: 61% at 2-3s, 14% at 3-5s, 15% at 5-10s, 9% at 10-30s
+    // Average: 4.65s, Median: 2.00s
     const gapRoll = Math.random();
     let gap: number;
-    if (gapRoll < 0.726) {
-        gap = 2000 + Math.random() * 1000; // 2-3s (72.6%)
-    } else if (gapRoll < 0.863) {
-        gap = 4000 + Math.random() * 1000; // 4-5s (13.7%)
-    } else if (gapRoll < 0.948) {
-        gap = 5000 + Math.random() * 5000; // 5-10s (8.5%)
-    } else if (gapRoll < 0.987) {
-        gap = 10000 + Math.random() * 10000; // 10-20s (3.9%)
+    if (gapRoll < 0.61) {
+        gap = 2000 + Math.random() * 1000; // 2-3s (61%)
+    } else if (gapRoll < 0.75) {
+        gap = 3000 + Math.random() * 2000; // 3-5s (14%)
+    } else if (gapRoll < 0.90) {
+        gap = 5000 + Math.random() * 5000; // 5-10s (15%)
+    } else if (gapRoll < 0.99) {
+        gap = 10000 + Math.random() * 20000; // 10-30s (9%)
     } else {
-        gap = 20000 + Math.random() * 10000; // 20s+ (1.3%)
+        gap = 30000 + Math.random() * 30000; // 30-60s (1%)
     }
 
     buildState.lastTradeTime = now;
@@ -1971,7 +2079,8 @@ async function settlePositions(): Promise<void> {
         if (position.isSettled) continue;
         // Only settle if endDate is set AND has passed
         // Skip if endDate is 0/undefined (not set yet)
-        if (!position.endDate || position.endDate === 0 || position.endDate > now) continue;
+        const posEndMs = toMs(position.endDate);
+        if (!posEndMs || posEndMs > now) continue;
 
         // Get final prices
         const market = discoveredMarkets.get(conditionId);
@@ -2165,9 +2274,18 @@ function displayStatus(): void {
             const next15MinStart = (current15MinStart + 15) % 60;
             const nextWindowHour = current15MinStart + 15 >= 60 ? (currentHour + 1) % 24 : currentHour;
 
+            // Calculate PREVIOUS 15-min window start (for grace period display)
+            const prev15MinStart = (current15MinStart - 15 + 60) % 60;
+            const prevWindowHour = current15MinStart - 15 < 0 ? (currentHour - 1 + 24) % 24 : currentHour;
+
             // Check if we're within 10 seconds of window switch - if so, also show NEXT window markets
             const secondsUntilSwitch = (15 - (currentMinute % 15)) * 60 - currentSecond;
             const showNextWindow = secondsUntilSwitch <= 10 && secondsUntilSwitch >= 0;
+
+            // Check if we're in the first 60 seconds of a new window - keep showing PREVIOUS window
+            // This prevents trades from dropping to 0 while waiting for new market to be discovered
+            const secondsIntoWindow = (currentMinute % 15) * 60 + currentSecond;
+            const showPreviousWindow = secondsIntoWindow <= 60;
 
             // First try slug format: btc-updown-15m-{unix_timestamp}
             if (marketSlug) {
@@ -2188,13 +2306,14 @@ function displayStatus(): void {
                     const marketWindow = Math.floor(marketETMinute / 15) * 15;
 
                     // Debug log for 15-min market matching
-                    debugLog(`15m filter: ${marketKey} | slug=${marketSlug?.split('-').pop()} | currentHour=${currentHour} marketHour=${marketETHour} | currentWindow=${current15MinStart} marketWindow=${marketWindow} | secsToSwitch=${secondsUntilSwitch}`);
+                    debugLog(`15m filter: ${marketKey} | slug=${marketSlug?.split('-').pop()} | currentHour=${currentHour} marketHour=${marketETHour} | currentWindow=${current15MinStart} marketWindow=${marketWindow} | secsToSwitch=${secondsUntilSwitch} secsIntoWindow=${secondsIntoWindow}`);
 
-                    // Match current window OR next window if we're about to switch
+                    // Match current window OR next window if we're about to switch OR previous window during grace period
                     const matchesCurrent = marketETHour === currentHour && marketWindow === current15MinStart;
                     const matchesNext = showNextWindow && marketETHour === nextWindowHour && marketWindow === next15MinStart;
+                    const matchesPrevious = showPreviousWindow && marketETHour === prevWindowHour && marketWindow === prev15MinStart;
 
-                    return matchesCurrent || matchesNext;
+                    return matchesCurrent || matchesNext || matchesPrevious;
                 }
             }
 
@@ -2213,9 +2332,11 @@ function displayStatus(): void {
                 if (startAMPM === 'AM' && startHour === 12) startHour = 0;
             }
 
-            // Check if market matches current 15-minute window
-            // Market should start at currentHour:current15MinStart
-            return startHour === currentHour && startMinute === current15MinStart;
+            // Check if market matches current 15-minute window, next window, or previous window (grace period)
+            const matchesCurrent = startHour === currentHour && startMinute === current15MinStart;
+            const matchesNext = showNextWindow && startHour === nextWindowHour && startMinute === next15MinStart;
+            const matchesPrevious = showPreviousWindow && startHour === prevWindowHour && startMinute === prev15MinStart;
+            return matchesCurrent || matchesNext || matchesPrevious;
         } else {
             // For 1-hour markets: extract hour
             // First try slug format: bitcoin-up-or-down-december-26-10am-et
@@ -2257,8 +2378,9 @@ function displayStatus(): void {
     const activeMarkets = Array.from(discoveredMarkets.entries()).filter(
         ([id, m]) => {
             // First filter: not expired (with grace period for display)
-            if (m.endDate && m.endDate + DISPLAY_GRACE_PERIOD_MS <= now) {
-                debugLog(`Filtered out ${m.marketKey}: expired beyond grace period`);
+            const endDateMs = toMs(m.endDate);
+            if (endDateMs > 0 && endDateMs + DISPLAY_GRACE_PERIOD_MS <= now) {
+                debugLog(`Filtered out ${m.marketKey}: expired beyond grace period (endDate=${new Date(endDateMs).toISOString()})`);
                 return false;
             }
 
@@ -2364,9 +2486,16 @@ function displayStatus(): void {
             const tradesUp = buildState ? buildState.tradeCountUp : 0;
             const tradesDown = buildState ? buildState.tradeCountDown : 0;
 
-            // Get live prices with validation (same as watcher mode)
-            const liveUp = m.priceUp || 0;
-            const liveDown = m.priceDown || 0;
+            // CRITICAL: ONLY use marketTracker's prices (same source as watcher mode)
+            // This ensures both watcher and paper mode show identical prices
+            // Do NOT fall back to paper mode's own prices - they may be from wrong asset IDs
+            const trackerMarket = marketTracker.getMarkets().get(m.marketKey);
+            const liveUp = trackerMarket?.currentPriceUp ?? 0;
+            const liveDown = trackerMarket?.currentPriceDown ?? 0;
+
+            // DEBUG: Log each market's price source
+            const hasTrackerPrices = trackerMarket && trackerMarket.currentPriceUp && trackerMarket.currentPriceDown;
+            debugLog(`📊 DISPLAY ${m.marketKey}: priceUp=${liveUp.toFixed(4)} priceDown=${liveDown.toFixed(4)} (from marketTracker: ${hasTrackerPrices ? 'YES' : 'NO'}) | trackerAssetUp=${trackerMarket?.assetUp?.slice(0,16)}... trackerAssetDown=${trackerMarket?.assetDown?.slice(0,16)}... | paperAssetUp=${m.assetUp?.slice(0,16)}... paperAssetDown=${m.assetDown?.slice(0,16)}... | conditionId=${id.slice(0,16)}...`);
 
             // Validate prices are within valid range (0 to 1) - same as watcher
             const hasValidPriceUp = liveUp > 0 && liveUp <= 1;
@@ -2567,10 +2696,10 @@ function displayStatus(): void {
     const nextHourStr = upcomingHour < 12 ? `${upcomingHour + 1}AM` : upcomingHour === 11 ? '12PM' : upcomingHour === 23 ? '12AM' : `${upcomingHour - 11}PM`;
 
     // Check what markets we have discovered
-    const hasBTC15m = Array.from(discoveredMarkets.values()).some(m => m.marketKey === 'BTC-UpDown-15' && m.endDate && m.endDate > now);
-    const hasETH15m = Array.from(discoveredMarkets.values()).some(m => m.marketKey === 'ETH-UpDown-15' && m.endDate && m.endDate > now);
-    const hasBTC1h = Array.from(discoveredMarkets.values()).some(m => m.marketKey.startsWith('BTC-UpDown-1h') && m.endDate && m.endDate > now);
-    const hasETH1h = Array.from(discoveredMarkets.values()).some(m => m.marketKey.startsWith('ETH-UpDown-1h') && m.endDate && m.endDate > now);
+    const hasBTC15m = Array.from(discoveredMarkets.values()).some(m => m.marketKey === 'BTC-UpDown-15' && isMarketActive(m.endDate, now));
+    const hasETH15m = Array.from(discoveredMarkets.values()).some(m => m.marketKey === 'ETH-UpDown-15' && isMarketActive(m.endDate, now));
+    const hasBTC1h = Array.from(discoveredMarkets.values()).some(m => m.marketKey.startsWith('BTC-UpDown-1h') && isMarketActive(m.endDate, now));
+    const hasETH1h = Array.from(discoveredMarkets.values()).some(m => m.marketKey.startsWith('ETH-UpDown-1h') && isMarketActive(m.endDate, now));
 
     // Calculate seconds until next 15-min window
     const secsToNext15m = (15 - (upcomingMinute % 15)) * 60 - new Date(now).getSeconds();
