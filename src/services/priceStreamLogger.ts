@@ -3,11 +3,14 @@
  *
  * Logs real-time orderbook prices with millisecond precision
  * Inserts watcher/paper trades at their exact timestamps with matching prices
+ *
+ * IMPORTANT: Paper mode and Watch mode use SEPARATE CSV files to prevent data conflicts
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { getRunId } from '../utils/runId';
+import { ENV } from '../config/env';
 
 /**
  * Helper function to break down timestamp into detailed components
@@ -98,10 +101,16 @@ class PriceStreamLogger {
         }
 
         const runId = getRunId();
-        this.btc15mPath = this.findOrCreatePriceFile(livePricesDir, 'BTC', '15 min', runId);
-        this.eth15mPath = this.findOrCreatePriceFile(livePricesDir, 'ETH', '15 min', runId);
-        this.btc1hPath = this.findOrCreatePriceFile(livePricesDir, 'BTC', '1 hour', runId);
-        this.eth1hPath = this.findOrCreatePriceFile(livePricesDir, 'ETH', '1 hour', runId);
+
+        // Use mode-specific prefix to prevent conflicts between paper and watch modes
+        const modePrefix = ENV.PAPER_MODE ? 'PAPER - ' : '';
+
+        this.btc15mPath = this.findOrCreatePriceFile(livePricesDir, `${modePrefix}BTC`, '15 min', runId);
+        this.eth15mPath = this.findOrCreatePriceFile(livePricesDir, `${modePrefix}ETH`, '15 min', runId);
+        this.btc1hPath = this.findOrCreatePriceFile(livePricesDir, `${modePrefix}BTC`, '1 hour', runId);
+        this.eth1hPath = this.findOrCreatePriceFile(livePricesDir, `${modePrefix}ETH`, '1 hour', runId);
+
+        console.log(`📊 Price Stream Logger initialized in ${ENV.PAPER_MODE ? 'PAPER' : 'WATCH'} mode`);
 
         this.initializeCsvFiles();
     }

@@ -401,13 +401,55 @@ class TradeLogger {
                 // This is more reliable than fetching again since marketTracker continuously updates prices
                 let foundMarket: any = null;
 
-                // Try to find the market in marketTracker by conditionId or slug
+                // Try to find the market in marketTracker by multiple methods
                 const trackerMarkets = marketTracker.getMarkets();
-                for (const [_, market] of trackerMarkets) {
-                    if (market.conditionId === activity.conditionId ||
-                        market.marketSlug === activity.slug) {
+                const activitySlug = activity.slug || '';
+                const activityConditionId = activity.conditionId || '';
+
+                // Method 1: Direct match by conditionId or slug
+                for (const [marketKey, market] of trackerMarkets) {
+                    if (market.conditionId === activityConditionId ||
+                        market.marketSlug === activitySlug) {
                         foundMarket = market;
                         break;
+                    }
+                }
+
+                // Method 2: If not found, try partial slug match (e.g., btc-updown-15m matches)
+                if (!foundMarket && activitySlug) {
+                    const slugLower = activitySlug.toLowerCase();
+                    for (const [marketKey, market] of trackerMarkets) {
+                        const marketSlugLower = (market.marketSlug || '').toLowerCase();
+                        // Check if slugs share the same base pattern
+                        if (slugLower.includes('btc-updown-15m') && marketSlugLower.includes('btc-updown-15m')) {
+                            foundMarket = market;
+                            break;
+                        }
+                        if (slugLower.includes('eth-updown-15m') && marketSlugLower.includes('eth-updown-15m')) {
+                            foundMarket = market;
+                            break;
+                        }
+                        if (slugLower.includes('btc') && slugLower.includes('1h') && marketSlugLower.includes('btc') && marketKey.includes('1h')) {
+                            foundMarket = market;
+                            break;
+                        }
+                        if (slugLower.includes('eth') && slugLower.includes('1h') && marketSlugLower.includes('eth') && marketKey.includes('1h')) {
+                            foundMarket = market;
+                            break;
+                        }
+                    }
+                }
+
+                // Method 3: Try by marketKey pattern from the extracted key
+                if (!foundMarket) {
+                    const extractedKey = this.extractMarketKey(activity);
+                    if (extractedKey && extractedKey !== 'Unknown') {
+                        for (const [marketKey, market] of trackerMarkets) {
+                            if (marketKey.includes(extractedKey) || extractedKey.includes(marketKey.split('-').slice(0,2).join('-'))) {
+                                foundMarket = market;
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -417,6 +459,8 @@ class TradeLogger {
                         priceUp: foundMarket.currentPriceUp,
                         priceDown: foundMarket.currentPriceDown
                     };
+                    // Debug log when we successfully use cached prices
+                    console.log(`📊 PRICE MATCH: ${marketKey} using cached prices UP=$${foundMarket.currentPriceUp.toFixed(4)} DOWN=$${foundMarket.currentPriceDown.toFixed(4)}`);
                 } else {
                     // Fallback: Try to fetch from API
                     const assetUpId = foundMarket?.assetUp;
@@ -427,8 +471,10 @@ class TradeLogger {
                     // Use fetched prices if valid (not default 0.5/0.5)
                     if (fetchedPrices.priceUp !== 0.5 || fetchedPrices.priceDown !== 0.5) {
                         prices = fetchedPrices;
+                        console.log(`📊 PRICE FETCH: Using API prices UP=$${fetchedPrices.priceUp.toFixed(4)} DOWN=$${fetchedPrices.priceDown.toFixed(4)}`);
                     } else {
                         // Last resort: Use execution price for traded side, calculate other
+                        console.log(`⚠️ PRICE FALLBACK: No cached/fetched prices found for ${activitySlug || activityConditionId}, using calculation`);
                         if (isUp) {
                             prices = {
                                 priceUp: tradePrice,
