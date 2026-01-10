@@ -561,8 +561,39 @@ class MarketTracker {
         // Check for ETH-UpDown-15, ETH-UpDown-1h, BTC-UpDown-15, or BTC-UpDown-1h markets
         const upDownType = this.getUpDown15MarketType(activity);
         if (upDownType) {
-            // For 15min markets, use the category directly as key
+            // For 15min markets, extract timestamp from slug to create unique key
             if (upDownType === 'BTC-UpDown-15' || upDownType === 'ETH-UpDown-15') {
+                // Try to extract timestamp from slug (e.g., "btc-updown-15m-1736520900")
+                const tsMatch = rawTitle.match(/updown-15m-(\d+)/i);
+                if (tsMatch) {
+                    return `${upDownType}-${tsMatch[1]}`;
+                }
+
+                // Fallback 1: Match by conditionId if available
+                if (activity?.conditionId) {
+                    const matchByCondition = Array.from(this.markets.entries())
+                        .find(([key, market]) => key.startsWith(upDownType) && market.conditionId === activity.conditionId);
+                    if (matchByCondition) {
+                        return matchByCondition[0];
+                    }
+                }
+
+                // Fallback 2: Match by asset ID if available
+                if (activity?.asset) {
+                    const matchByAsset = Array.from(this.markets.entries())
+                        .find(([key, market]) => key.startsWith(upDownType) &&
+                            (market.assetUp === activity.asset || market.assetDown === activity.asset));
+                    if (matchByAsset) {
+                        return matchByAsset[0];
+                    }
+                }
+
+                // Fallback 3: find the matching market by checking which 15-min market is active
+                const matchingMarket = Array.from(this.markets.entries())
+                    .find(([key, market]) => key.startsWith(upDownType) && market.endDate && market.endDate > Date.now());
+                if (matchingMarket) {
+                    return matchingMarket[0]; // Return the actual market key with timestamp
+                }
                 return upDownType;
             }
             
@@ -818,17 +849,19 @@ class MarketTracker {
      */
     private removeOlderUpDown15Markets(newMarketKey: string, newMarketActivity: any): void {
         // Check if this is an UpDown market (15min or hourly)
-        const isUpDown15 = newMarketKey === 'ETH-UpDown-15' || newMarketKey === 'BTC-UpDown-15';
+        // Use startsWith for 15m since keys now include timestamp (e.g., "BTC-UpDown-15-1736520900")
+        const isUpDown15 = newMarketKey.startsWith('ETH-UpDown-15') || newMarketKey.startsWith('BTC-UpDown-15');
         const isUpDown1h = newMarketKey.startsWith('ETH-UpDown-1h') || newMarketKey.startsWith('BTC-UpDown-1h');
-        
+
         if (!isUpDown15 && !isUpDown1h) {
             return;
         }
-        
+
         // Extract category for comparison (BTC-UpDown-15, BTC-UpDown-1h, etc.)
         let newCategory: string;
         if (isUpDown15) {
-            newCategory = newMarketKey; // e.g., "BTC-UpDown-15"
+            // Extract base category without timestamp (e.g., "BTC-UpDown-15" from "BTC-UpDown-15-1736520900")
+            newCategory = newMarketKey.split('-').slice(0, 3).join('-'); // "BTC-UpDown-15"
         } else {
             // For hourly markets, extract base category (e.g., "BTC-UpDown-1h" from "BTC-UpDown-1h-6")
             newCategory = newMarketKey.split('-').slice(0, 3).join('-'); // "BTC-UpDown-1h"
@@ -1354,6 +1387,34 @@ class MarketTracker {
             }
         }
 
+        // ==========================================================================
+        // CRITICAL: For hourly markets, verify this trade is for the CURRENT hour!
+        // This prevents old trades from being re-counted when bot restarts
+        // ==========================================================================
+        const isHourlyMarket = /up-or-down|bitcoin.*\d{1,2}(am|pm)|ethereum.*\d{1,2}(am|pm)/i.test(slug) && !is15MinMarket;
+
+        if (isHourlyMarket && slug) {
+            // Extract hour from slug (e.g., "bitcoin-up-or-down-january-10-10am-et")
+            const hourMatch = slug.match(/(\d{1,2})(am|pm)-et$/i);
+            if (hourMatch) {
+                let tradeHour = parseInt(hourMatch[1], 10);
+                const ampm = hourMatch[2].toLowerCase();
+                if (ampm === 'pm' && tradeHour !== 12) tradeHour += 12;
+                if (ampm === 'am' && tradeHour === 12) tradeHour = 0;
+
+                // Get current hour in ET
+                const now = new Date();
+                const etOptions: Intl.DateTimeFormatOptions = { timeZone: 'America/New_York', hour: 'numeric', hour12: false };
+                const currentHourET = parseInt(new Intl.DateTimeFormat('en-US', etOptions).format(now), 10);
+
+                // Only process trades from the current hour
+                if (tradeHour !== currentHourET) {
+                    // Skip trades from old hours - they should not accumulate new stats
+                    return;
+                }
+            }
+        }
+
         // Create unique trade identifier to prevent double-counting
         // Use transactionHash + asset + side as unique key
         const tradeId = activity.transactionHash
@@ -1682,9 +1743,12 @@ class MarketTracker {
      * Fetch asset IDs from Gamma API if missing
      */
     private async fetchAssetIdsIfMissing(market: MarketStats): Promise<boolean> {
-        // Only fetch if we're missing asset IDs and have conditionId or slug
-        if ((market.assetUp && market.assetDown) || (!market.conditionId && !market.marketSlug)) {
-            return false; // Already have assets or no way to fetch them
+        // Fetch if we're missing ANY asset ID and have conditionId or slug
+        // Previously this returned early if ONE asset was set, but we need BOTH for price fetching
+        const needsAssetUp = !market.assetUp;
+        const needsAssetDown = !market.assetDown;
+        if ((!needsAssetUp && !needsAssetDown) || (!market.conditionId && !market.marketSlug)) {
+            return false; // Already have BOTH assets or no way to fetch them
         }
 
         try {
@@ -1697,9 +1761,29 @@ class MarketTracker {
                     const markets = event.markets || [];
                     if (markets.length > 0) {
                         const marketData = markets[0];
-                        const clobTokenIds = marketData.clobTokenIds || [];
+                        // clobTokenIds comes as a JSON string from Gamma API, need to parse it
+                        let clobTokenIds: string[] = [];
+                        if (typeof marketData.clobTokenIds === 'string') {
+                            try {
+                                clobTokenIds = JSON.parse(marketData.clobTokenIds);
+                            } catch {
+                                clobTokenIds = [];
+                            }
+                        } else if (Array.isArray(marketData.clobTokenIds)) {
+                            clobTokenIds = marketData.clobTokenIds;
+                        }
                         if (clobTokenIds.length >= 2) {
-                            const outcomes = marketData.outcomes || ['Up', 'Down'];
+                            // outcomes also comes as JSON string
+                            let outcomes: string[] = ['Up', 'Down'];
+                            if (typeof marketData.outcomes === 'string') {
+                                try {
+                                    outcomes = JSON.parse(marketData.outcomes);
+                                } catch {
+                                    outcomes = ['Up', 'Down'];
+                                }
+                            } else if (Array.isArray(marketData.outcomes)) {
+                                outcomes = marketData.outcomes;
+                            }
                             const isFirstUp = outcomes[0]?.toLowerCase().includes('up');
                             market.assetUp = isFirstUp ? clobTokenIds[0] : clobTokenIds[1];
                             market.assetDown = isFirstUp ? clobTokenIds[1] : clobTokenIds[0];
@@ -1716,12 +1800,35 @@ class MarketTracker {
 
                 if (Array.isArray(marketList)) {
                     const marketData = marketList.find((m: any) => m.condition_id === market.conditionId);
-                    if (marketData && marketData.clobTokenIds && marketData.clobTokenIds.length >= 2) {
-                        const outcomes = marketData.outcomes || ['Up', 'Down'];
-                        const isFirstUp = outcomes[0]?.toLowerCase().includes('up');
-                        market.assetUp = isFirstUp ? marketData.clobTokenIds[0] : marketData.clobTokenIds[1];
-                        market.assetDown = isFirstUp ? marketData.clobTokenIds[1] : marketData.clobTokenIds[0];
-                        return true; // Successfully fetched asset IDs
+                    if (marketData && marketData.clobTokenIds) {
+                        // clobTokenIds comes as a JSON string from Gamma API, need to parse it
+                        let clobTokenIds: string[] = [];
+                        if (typeof marketData.clobTokenIds === 'string') {
+                            try {
+                                clobTokenIds = JSON.parse(marketData.clobTokenIds);
+                            } catch {
+                                clobTokenIds = [];
+                            }
+                        } else if (Array.isArray(marketData.clobTokenIds)) {
+                            clobTokenIds = marketData.clobTokenIds;
+                        }
+                        if (clobTokenIds.length >= 2) {
+                            // outcomes also comes as JSON string
+                            let outcomes: string[] = ['Up', 'Down'];
+                            if (typeof marketData.outcomes === 'string') {
+                                try {
+                                    outcomes = JSON.parse(marketData.outcomes);
+                                } catch {
+                                    outcomes = ['Up', 'Down'];
+                                }
+                            } else if (Array.isArray(marketData.outcomes)) {
+                                outcomes = marketData.outcomes;
+                            }
+                            const isFirstUp = outcomes[0]?.toLowerCase().includes('up');
+                            market.assetUp = isFirstUp ? clobTokenIds[0] : clobTokenIds[1];
+                            market.assetDown = isFirstUp ? clobTokenIds[1] : clobTokenIds[0];
+                            return true; // Successfully fetched asset IDs
+                        }
                     }
                 }
             }
@@ -1736,6 +1843,45 @@ class MarketTracker {
             // If asset IDs are missing, try to fetch them first
             if (!market.assetUp || !market.assetDown) {
                 await this.fetchAssetIdsIfMissing(market);
+            }
+
+            // If still missing asset IDs, try to get them from priceStreamLogger
+            if (!market.assetUp || !market.assetDown) {
+                const currentMarkets = priceStreamLogger.getCurrentMarkets();
+                // Match by category and hour for hourly markets, or by timestamp for 15m
+                for (const [marketType, info] of currentMarkets.entries()) {
+                    if (!info.tokens || info.tokens.length < 2) continue;
+
+                    const isBTCType = marketType.includes('btc') || marketType.includes('bitcoin');
+                    const is15MinType = marketType.includes('15m');
+                    const is1HourType = marketType.includes('up-or-down') && !is15MinType;
+
+                    let expectedKey: string | null = null;
+                    if (is15MinType) {
+                        const slug = (info.slug || '').toLowerCase();
+                        const tsMatch = slug.match(/updown-15m-(\d+)/);
+                        const timestamp = tsMatch ? tsMatch[1] : '';
+                        const baseKey = isBTCType ? 'BTC-UpDown-15' : 'ETH-UpDown-15';
+                        expectedKey = timestamp ? `${baseKey}-${timestamp}` : baseKey;
+                    } else if (is1HourType) {
+                        const question = info.question || '';
+                        const slug = (info.slug || '').toLowerCase();
+                        let hourNum = '0';
+                        const questionMatch = question.match(/,\s*(\d{1,2})\s*(AM|PM)\s*ET/i);
+                        const slugMatch = slug.match(/-(\d{1,2})(am|pm)-et$/i);
+                        if (questionMatch) hourNum = questionMatch[1];
+                        else if (slugMatch) hourNum = slugMatch[1];
+                        expectedKey = isBTCType ? `BTC-UpDown-1h-${hourNum}` : `ETH-UpDown-1h-${hourNum}`;
+                    }
+
+                    if (expectedKey && market.marketKey === expectedKey) {
+                        const upToken = info.tokens.find((t: any) => t.outcome?.toUpperCase().includes('UP')) || info.tokens[0];
+                        const downToken = info.tokens.find((t: any) => t.outcome?.toUpperCase().includes('DOWN')) || info.tokens[1];
+                        if (!market.assetUp && upToken?.token_id) market.assetUp = upToken.token_id;
+                        if (!market.assetDown && downToken?.token_id) market.assetDown = downToken.token_id;
+                        break;
+                    }
+                }
             }
 
             // Try order book prices if we have asset IDs
@@ -1910,6 +2056,54 @@ class MarketTracker {
             // Keep all other markets (stable dashboard)
             return true;
         });
+
+        // IMPORTANT: Keep only 1 market per category (BTC-15m, ETH-15m, BTC-1h, ETH-1h)
+        // This prevents duplicate markets from appearing on the dashboard
+        // For each category, keep only the one ending soonest (current active market)
+        const categories = ['BTC-UpDown-15', 'ETH-UpDown-15', 'BTC-UpDown-1h', 'ETH-UpDown-1h'];
+        for (const category of categories) {
+            const marketsInCategory = Array.from(this.markets.entries())
+                .filter(([key]) => key.startsWith(category))
+                .map(([key, market]) => ({ key, market }));
+
+            if (marketsInCategory.length > 1) {
+                // Sort by endDate ascending - keep the one ending soonest (current market)
+                marketsInCategory.sort((a, b) => {
+                    const endA = a.market.endDate || Infinity;
+                    const endB = b.market.endDate || Infinity;
+                    return endA - endB;
+                });
+
+                // Remove all but the first (current) market
+                for (let i = 1; i < marketsInCategory.length; i++) {
+                    const marketToRemove = marketsInCategory[i];
+                    // Log PnL before removing if it has trades
+                    if (marketToRemove.market.investedUp > 0 || marketToRemove.market.investedDown > 0) {
+                        if (!this.pnlCapturedMarkets.has(marketToRemove.key)) {
+                            const fullMarketName = marketToRemove.market.marketName || marketToRemove.market.marketKey;
+                            const currentPnL = this.calculateCurrentPnL(marketToRemove.market);
+                            console.log(`📊 Captured PnL on category dedup: ${fullMarketName} | PnL: $${currentPnL.toFixed(2)}`);
+                            watcherPnLTracker.logMarketPnL(
+                                fullMarketName,
+                                marketToRemove.market.conditionId || '',
+                                marketToRemove.market.marketKey,
+                                marketToRemove.market.sharesUp,
+                                marketToRemove.market.sharesDown,
+                                marketToRemove.market.totalCostUp,
+                                marketToRemove.market.totalCostDown,
+                                marketToRemove.market.currentPriceUp || 0,
+                                marketToRemove.market.currentPriceDown || 0,
+                                marketToRemove.market.tradesUp,
+                                marketToRemove.market.tradesDown
+                            );
+                            this.pnlCapturedMarkets.add(marketToRemove.key);
+                        }
+                    }
+                    this.markets.delete(marketToRemove.key);
+                    this.pnlCapturedMarkets.delete(marketToRemove.key);
+                }
+            }
+        }
 
         // Remove closed/stale markets from tracking and log PnL
         const closedMarkets: MarketStats[] = [];
@@ -2381,9 +2575,9 @@ class MarketTracker {
         const nextHour12 = nextHourDisplay === 0 ? 12 : nextHourDisplay > 12 ? nextHourDisplay - 12 : nextHourDisplay;
         const nextHourStr = `${nextHour12}${nextHourAmPm} ET`;
 
-        // Check what markets we have discovered
-        const hasBTC15m = Array.from(this.markets.values()).some(m => m.marketKey === 'BTC-UpDown-15' && m.endDate && m.endDate > now);
-        const hasETH15m = Array.from(this.markets.values()).some(m => m.marketKey === 'ETH-UpDown-15' && m.endDate && m.endDate > now);
+        // Check what markets we have discovered (use startsWith for 15m since keys now include timestamp)
+        const hasBTC15m = Array.from(this.markets.values()).some(m => m.marketKey.startsWith('BTC-UpDown-15') && m.endDate && m.endDate > now);
+        const hasETH15m = Array.from(this.markets.values()).some(m => m.marketKey.startsWith('ETH-UpDown-15') && m.endDate && m.endDate > now);
         const hasBTC1h = Array.from(this.markets.values()).some(m => m.marketKey.startsWith('BTC-UpDown-1h') && m.endDate && m.endDate > now);
         const hasETH1h = Array.from(this.markets.values()).some(m => m.marketKey.startsWith('ETH-UpDown-1h') && m.endDate && m.endDate > now);
 
@@ -2783,7 +2977,11 @@ class MarketTracker {
             let marketKey: string;
 
             if (is15Min) {
-                marketKey = isBTC ? 'BTC-UpDown-15' : 'ETH-UpDown-15';
+                // Extract timestamp from slug to create unique key for each 15-min window
+                const tsMatch = slug.match(/updown-15m-(\d+)/);
+                const timestamp = tsMatch ? tsMatch[1] : '';
+                const baseKey = isBTC ? 'BTC-UpDown-15' : 'ETH-UpDown-15';
+                marketKey = timestamp ? `${baseKey}-${timestamp}` : baseKey;
             } else {
                 // Hourly - extract hour for unique key
                 const hourMatch = slug.match(/(\d+)(am|pm)-et$/i);
@@ -3049,7 +3247,12 @@ class MarketTracker {
             // Build dashboard marketKey
             let marketKey: string | null = null;
             if (is15MinType) {
-                marketKey = isBTCType ? 'BTC-UpDown-15' : 'ETH-UpDown-15';
+                // Extract timestamp from slug to create unique key matching extractMarketKey()
+                const slug = (info.slug || '').toLowerCase();
+                const tsMatch = slug.match(/updown-15m-(\d+)/);
+                const timestamp = tsMatch ? tsMatch[1] : '';
+                const baseKey = isBTCType ? 'BTC-UpDown-15' : 'ETH-UpDown-15';
+                marketKey = timestamp ? `${baseKey}-${timestamp}` : baseKey;
             } else if (is1HourType) {
                 // Extract hour number from question or slug (e.g., ", 2PM ET" or "-2pm-et")
                 const question = info.question || '';
