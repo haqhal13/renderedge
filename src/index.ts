@@ -1,7 +1,6 @@
 import * as readline from 'readline';
 import * as dotenv from 'dotenv';
 import Logger from './utils/logger';
-import publishAppState from './services/webAppPublisher';
 import { setRuntimeMode, setStatusMessage, setHealthSnapshot } from './services/appState';
 import startAppServer from './server/appServer';
 
@@ -97,6 +96,8 @@ export const main = async () => {
 
     const envModule = await import('./config/env');
     const ENV = envModule.ENV;
+    const webPublisherModule = await import('./services/webAppPublisher');
+    const publishAppState = webPublisherModule.default;
     const dbModule = await import('./config/db');
     const connectDB = dbModule.default;
     const closeDB = dbModule.closeDB;
