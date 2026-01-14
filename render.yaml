@@ -27,3 +27,5 @@ services:
         sync: false
       - key: WEBAPP_API_KEY
         sync: false
+      - key: BOT_ID
+        value: watcher

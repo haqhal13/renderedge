@@ -18,9 +18,11 @@ const sendPayload = async (reason: string): Promise<void> => {
 
     try {
         const snapshot = getSnapshot();
+        const botId = process.env.BOT_ID || 'watcher';
         await axios.post(
             url,
             {
+                botId,
                 reason,
                 runtimeMode: snapshot.mode,
                 payload: snapshot,
