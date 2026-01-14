@@ -1,4 +1,5 @@
 import { HealthCheckResult } from '../utils/healthCheck';
+import { WatchedAddress } from './watchlistManager';
 
 export interface TradeEventPayload {
     traderAddress: string;
@@ -40,7 +41,56 @@ export interface PortfolioSnapshot {
     currentValue: number;
     availableCash: number;
     overallPnl: number;
+    totalPnL?: number;
+    totalPnLPercent?: number;
+    totalTrades?: number;
+    pnl15m?: number;
+    pnl15mPercent?: number;
+    trades15m?: number;
+    pnl1h?: number;
+    pnl1hPercent?: number;
+    trades1h?: number;
+    pnl5m?: number;
+    pnl5mPercent?: number;
+    trades5m?: number;
     updatedAt: number;
+}
+
+export interface MarketSummary {
+    marketKey: string;
+    marketName: string;
+    category: string;
+    endDate?: number;
+    timeRemaining: string;
+    isExpired: boolean;
+    priceUp: number;
+    priceDown: number;
+    sharesUp: number;
+    sharesDown: number;
+    investedUp: number;
+    investedDown: number;
+    currentValueUp: number;
+    currentValueDown: number;
+    pnlUp: number;
+    pnlDown: number;
+    pnlUpPercent: number;
+    pnlDownPercent: number;
+    totalPnL: number;
+    totalPnLPercent: number;
+    tradesUp: number;
+    tradesDown: number;
+    upPercent: number;
+    downPercent: number;
+}
+
+export interface PnlHistoryEntry {
+    marketName: string;
+    totalPnL: number;
+    pnlPercent: number;
+    outcome: 'UP' | 'DOWN';
+    timestamp: number;
+    marketType: '5m' | '15m' | '1h' | 'OTHER';
+    conditionId: string;
 }
 
 export interface AppStateSnapshot {
@@ -51,6 +101,9 @@ export interface AppStateSnapshot {
     trades: TradeEventPayload[];
     executions: ExecutionEventPayload[];
     myPortfolio?: PortfolioSnapshot;
+    marketSummaries?: MarketSummary[];
+    pnlHistory?: PnlHistoryEntry[];
+    watchlist?: WatchedAddress[];
     health?: HealthCheckResult;
     updatedAt: number;
 }
@@ -64,6 +117,9 @@ const state: AppStateSnapshot = {
     traders: [],
     trades: [],
     executions: [],
+    marketSummaries: [],
+    pnlHistory: [],
+    watchlist: [],
     updatedAt: Date.now(),
 };
 
@@ -118,12 +174,30 @@ export const setHealthSnapshot = (snapshot: HealthCheckResult): void => {
     updateTimestamp();
 };
 
+export const setMarketSummaries = (markets: MarketSummary[]): void => {
+    state.marketSummaries = markets;
+    updateTimestamp();
+};
+
+export const setPnlHistory = (entries: PnlHistoryEntry[]): void => {
+    state.pnlHistory = entries;
+    updateTimestamp();
+};
+
+export const setWatchlist = (entries: WatchedAddress[]): void => {
+    state.watchlist = entries;
+    updateTimestamp();
+};
+
 export const getSnapshot = (): AppStateSnapshot => ({
     ...state,
     traders: state.traders.map((s) => ({ ...s, topPositions: s.topPositions?.map((p) => ({ ...p })) })),
     trades: state.trades.map((trade) => ({ ...trade })),
     executions: state.executions.map((exec) => ({ ...exec })),
     myPortfolio: state.myPortfolio ? { ...state.myPortfolio } : undefined,
+    marketSummaries: state.marketSummaries ? state.marketSummaries.map((m) => ({ ...m })) : undefined,
+    pnlHistory: state.pnlHistory ? state.pnlHistory.map((p) => ({ ...p })) : undefined,
+    watchlist: state.watchlist ? state.watchlist.map((w) => ({ ...w })) : undefined,
     health: state.health ? JSON.parse(JSON.stringify(state.health)) : undefined,
 });
 

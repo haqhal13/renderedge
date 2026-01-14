@@ -2,6 +2,7 @@ import axios from 'axios';
 import { ENV } from '../config/env';
 import Logger from '../utils/logger';
 import { AppStateSnapshot, emitStateSnapshot } from './appState';
+import watchlistManager from './watchlistManager';
 
 const MIN_INTERVAL_MS = parseInt(process.env.WEBAPP_PUSH_INTERVAL_MS || '2000', 10);
 let lastPushedAt = 0;
@@ -33,10 +34,27 @@ const mapTrades = (trades: AppStateSnapshot['trades'] = []) =>
         };
     });
 
-const mapTraders = (traders: AppStateSnapshot['traders'] = []) =>
-    traders.map((trader) => ({
-        address: trader.address,
-        notes: trader.positionCount ? `${trader.positionCount} positions` : undefined,
+const mapTraders = (traders: AppStateSnapshot['traders'] = []) => {
+    const watchlistEntries = watchlistManager.getAllAddresses();
+    return traders.map((trader) => {
+        const watchEntry = watchlistEntries.find(
+            (w) => w.address.toLowerCase() === trader.address.toLowerCase()
+        );
+        return {
+            address: trader.address,
+            alias: watchEntry?.alias,
+            enabled: watchEntry?.enabled ?? true,
+            notes: trader.positionCount ? `${trader.positionCount} positions` : undefined,
+        };
+    });
+};
+
+const mapWatchlist = () =>
+    watchlistManager.getAllAddresses().map((entry) => ({
+        address: entry.address,
+        alias: entry.alias,
+        enabled: entry.enabled,
+        addedAt: entry.addedAt,
     }));
 
 const mapPortfolio = (snapshot: AppStateSnapshot) => {
@@ -62,6 +80,8 @@ const buildPayload = (snapshot: AppStateSnapshot) => ({
     trades: mapTrades(snapshot.trades),
     executions: snapshot.executions ?? [],
     health: snapshot.health ?? {},
+    watchlist: mapWatchlist(),
+    watchlistCount: watchlistManager.getCount(),
 });
 
 const sendPayload = async (reason: string, snapshot: AppStateSnapshot): Promise<void> => {
