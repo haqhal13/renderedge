@@ -448,7 +448,10 @@ class TradeLogger {
                     priceUp: activity.marketPriceUp,
                     priceDown: activity.marketPriceDown
                 };
-                console.log(`📊 LIVE PRICES: ${marketKey} UP=$${prices.priceUp.toFixed(4)} DOWN=$${prices.priceDown.toFixed(4)} (injected)`);
+                // Only log in non-watcher mode (verbose logging clutters dashboard)
+                if (!ENV.TRACK_ONLY_MODE) {
+                    console.log(`📊 LIVE PRICES: ${marketKey} UP=$${prices.priceUp.toFixed(4)} DOWN=$${prices.priceDown.toFixed(4)} (injected)`);
+                }
             } else {
                 // For WATCHER trades: Use prices from marketTracker (already fetched from orderbook)
                 // This is more reliable than fetching again since marketTracker continuously updates prices
@@ -639,14 +642,20 @@ class TradeLogger {
 
             // Validate prices are reasonable (skip if not)
             if (streamPriceUp <= 0 || streamPriceUp >= 1 || streamPriceDown <= 0 || streamPriceDown >= 1) {
-                console.log(`⚠️ Price stream entry skipped: invalid prices UP=$${streamPriceUp.toFixed(4)} DOWN=$${streamPriceDown.toFixed(4)}`);
+                // Only log warnings in non-watcher mode (keeps dashboard clean)
+                if (!ENV.TRACK_ONLY_MODE) {
+                    console.log(`⚠️ Price stream entry skipped: invalid prices UP=$${streamPriceUp.toFixed(4)} DOWN=$${streamPriceDown.toFixed(4)}`);
+                }
                 return;
             }
 
             // Also validate that prices add up (sanity check)
             const priceSum = streamPriceUp + streamPriceDown;
             if (priceSum < 0.90 || priceSum > 1.10) {
-                console.log(`⚠️ Price stream entry skipped: prices don't add up (UP=$${streamPriceUp.toFixed(4)} + DOWN=$${streamPriceDown.toFixed(4)} = $${priceSum.toFixed(4)})`);
+                // Only log warnings in non-watcher mode
+                if (!ENV.TRACK_ONLY_MODE) {
+                    console.log(`⚠️ Price stream entry skipped: prices don't add up (UP=$${streamPriceUp.toFixed(4)} + DOWN=$${streamPriceDown.toFixed(4)} = $${priceSum.toFixed(4)})`);
+                }
                 return;
             }
 

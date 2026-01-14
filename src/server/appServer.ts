@@ -170,26 +170,48 @@ export const startAppServer = async (): Promise<AppServerHandle> => {
         });
     });
 
-    const port = parseInt(process.env.PORT || '3000', 10);
+    const defaultPort = parseInt(process.env.PORT || '3000', 10);
+    const maxRetries = 10;
 
-    return await new Promise<AppServerHandle>((resolve) => {
-        const server = app.listen(port, () => {
-            Logger.success(`Web API listening on port ${port}`);
-            resolve({
-                port,
-                stop: () =>
-                    new Promise<void>((resolveClose, rejectClose) => {
-                        server.close((error) => {
-                            if (error) {
-                                rejectClose(error);
-                            } else {
-                                resolveClose();
-                            }
-                        });
-                    }),
+    const tryListen = (port: number, attempt: number): Promise<AppServerHandle> => {
+        return new Promise((resolve, reject) => {
+            const server = app.listen(port);
+
+            server.on('listening', () => {
+                Logger.success(`Web API listening on port ${port}`);
+                resolve({
+                    port,
+                    stop: () =>
+                        new Promise<void>((resolveClose, rejectClose) => {
+                            server.close((error) => {
+                                if (error) {
+                                    rejectClose(error);
+                                } else {
+                                    resolveClose();
+                                }
+                            });
+                        }),
+                });
+            });
+
+            server.on('error', (error: NodeJS.ErrnoException) => {
+                if (error.code === 'EADDRINUSE') {
+                    server.close();
+                    if (attempt < maxRetries) {
+                        const nextPort = port + 1;
+                        Logger.warning(`Port ${port} in use, trying ${nextPort}...`);
+                        resolve(tryListen(nextPort, attempt + 1));
+                    } else {
+                        reject(new Error(`Could not find available port after ${maxRetries} attempts`));
+                    }
+                } else {
+                    reject(error);
+                }
             });
         });
-    });
+    };
+
+    return tryListen(defaultPort, 1);
 };
 
 export default startAppServer;

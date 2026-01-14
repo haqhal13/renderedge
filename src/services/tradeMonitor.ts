@@ -267,14 +267,20 @@ const fetchTradeData = async () => {
                     // Inject fresh API prices into activity for accurate logging
                     activity.marketPriceUp = freshPrices.priceUp;
                     activity.marketPriceDown = freshPrices.priceDown;
-                    console.log(`📊 FRESH API PRICES: UP=$${freshPrices.priceUp.toFixed(4)} DOWN=$${freshPrices.priceDown.toFixed(4)}`);
+                    // Only log prices in non-watcher mode (verbose logging clutters dashboard)
+                    if (!ENV.TRACK_ONLY_MODE) {
+                        console.log(`📊 FRESH API PRICES: UP=$${freshPrices.priceUp.toFixed(4)} DOWN=$${freshPrices.priceDown.toFixed(4)}`);
+                    }
                 } else {
                     // Fallback to cached prices if fresh fetch fails
                     const cachedPrices = marketTracker.getLivePricesBySlug(activity.slug || '');
                     if (cachedPrices) {
                         activity.marketPriceUp = cachedPrices.priceUp;
                         activity.marketPriceDown = cachedPrices.priceDown;
-                        console.log(`📊 CACHED PRICES: UP=$${cachedPrices.priceUp.toFixed(4)} DOWN=$${cachedPrices.priceDown.toFixed(4)}`);
+                        // Only log prices in non-watcher mode
+                        if (!ENV.TRACK_ONLY_MODE) {
+                            console.log(`📊 CACHED PRICES: UP=$${cachedPrices.priceUp.toFixed(4)} DOWN=$${cachedPrices.priceDown.toFixed(4)}`);
+                        }
                     }
                 }
 
