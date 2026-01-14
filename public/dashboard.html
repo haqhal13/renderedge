@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EdgeBot Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 1rem; background: #0e1117; color: #f0f3f7; }
+    header { display: flex; justify-content: space-between; align-items: center; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 1rem; }
+    section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; }
+    h2 { margin-top: 0; font-size: 1.1rem; color: #58a6ff; }
+    pre { background: #0d1117; padding: 0.5rem; border-radius: 4px; max-height: 300px; overflow: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { padding: 0.2rem 0.4rem; border-bottom: 1px solid #30363d; }
+    .badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 999px; background: #238636; color: #fff; font-size: 0.8rem; }
+    .warning { background: #f85149; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>EdgeBot Monitor</h1>
+      <div id="status">Starting…</div>
+    </div>
+    <div>
+      <span id="mode" class="badge">--</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section>
+      <h2>Recent Trades</h2>
+      <table id="trades"></table>
+    </section>
+    <section>
+      <h2>Tracked Traders</h2>
+      <table id="traders"></table>
+    </section>
+    <section>
+      <h2>Raw Snapshot</h2>
+      <pre id="snapshot"></pre>
+    </section>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const modeEl = document.getElementById('mode');
+    const tradesEl = document.getElementById('trades');
+    const tradersEl = document.getElementById('traders');
+    const snapshotEl = document.getElementById('snapshot');
+
+    function renderTrades(trades = []) {
+      const latest = trades.slice(-10).reverse();
+      tradesEl.innerHTML = '<tr><th>Time</th><th>Trader</th><th>Market</th><th>Side</th><th>Size</th></tr>' +
+        latest.map((trade) => {
+          const date = new Date(trade.timestamp || Date.now()).toLocaleTimeString();
+          return `<tr>
+            <td>${date}</td>
+            <td>${trade.traderAddress?.slice(0, 6) ?? ''}…${trade.traderAddress?.slice(-4) ?? ''}</td>
+            <td>${trade.marketName ?? ''}</td>
+            <td>${trade.side ?? ''}</td>
+            <td>$${trade.usdcSize?.toFixed?.(2) ?? '--'}</td>
+          </tr>`;
+        }).join('');
+    }
+
+    function renderTraders(traders = []) {
+      tradersEl.innerHTML = '<tr><th>Address</th><th>Positions</th><th>PnL</th></tr>' +
+        traders.map((t) => `<tr>
+          <td>${t.address?.slice(0, 6) ?? ''}…${t.address?.slice(-4) ?? ''}</td>
+          <td>${t.positionCount ?? 0}</td>
+          <td>${(t.profitability ?? 0).toFixed(2)}%</td>
+        </tr>`).join('');
+    }
+
+    function renderSnapshot(snapshot, label) {
+      if (!snapshot) return;
+      modeEl.textContent = snapshot.mode === 'TRACK_ONLY' ? 'Watcher' : 'Trading';
+      statusEl.textContent = `Status: ${snapshot.status} · Updated ${new Date(snapshot.updatedAt).toLocaleTimeString()} (${label})`;
+      renderTrades(snapshot.trades || []);
+      renderTraders(snapshot.traders || []);
+      snapshotEl.textContent = JSON.stringify(snapshot, null, 2);
+    }
+
+    fetch('/state').then((res) => res.json()).then((snapshot) => {
+      renderSnapshot(snapshot, 'initial');
+    });
+
+    const source = new EventSource('/events');
+    source.addEventListener('init', (event) => {
+      renderSnapshot(JSON.parse(event.data), 'init');
+    });
+    source.addEventListener('trade', (event) => {
+      renderSnapshot(JSON.parse(event.data), 'trade');
+    });
+    source.onmessage = (event) => {
+      renderSnapshot(JSON.parse(event.data), 'update');
+    };
+    source.onerror = () => {
+      statusEl.textContent = 'Connection lost – retrying…';
+      modeEl.classList.add('warning');
+    };
+  </script>
+</body>
+</html>

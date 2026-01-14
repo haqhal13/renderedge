@@ -1,13 +1,13 @@
 import axios from 'axios';
 import { ENV } from '../config/env';
 import Logger from '../utils/logger';
-import { getSnapshot } from './appState';
+import { AppStateSnapshot, emitStateSnapshot } from './appState';
 
 const MIN_INTERVAL_MS = parseInt(process.env.WEBAPP_PUSH_INTERVAL_MS || '2000', 10);
 let lastPushedAt = 0;
 let pendingTimer: NodeJS.Timeout | null = null;
 
-const sendPayload = async (reason: string): Promise<void> => {
+const sendPayload = async (reason: string, snapshot: AppStateSnapshot): Promise<void> => {
     const url = ENV.WEBAPP_PUSH_URL;
     if (!url) {
         return;
@@ -17,7 +17,6 @@ const sendPayload = async (reason: string): Promise<void> => {
     pendingTimer = null;
 
     try {
-        const snapshot = getSnapshot();
         const botId = process.env.BOT_ID || 'watcher';
         await axios.post(
             url,
@@ -42,6 +41,8 @@ const sendPayload = async (reason: string): Promise<void> => {
 };
 
 export const publishAppState = (reason: string): void => {
+    const snapshot = emitStateSnapshot(reason);
+
     if (!ENV.WEBAPP_PUSH_URL) {
         return;
     }
@@ -50,7 +51,7 @@ export const publishAppState = (reason: string): void => {
     const elapsed = now - lastPushedAt;
 
     if (elapsed >= MIN_INTERVAL_MS) {
-        void sendPayload(reason);
+        void sendPayload(reason, snapshot);
         return;
     }
 
@@ -59,7 +60,8 @@ export const publishAppState = (reason: string): void => {
     }
 
     pendingTimer = setTimeout(() => {
-        void sendPayload(`${reason}-debounced`);
+        const debouncedSnapshot = emitStateSnapshot(`${reason}-debounced`);
+        void sendPayload(`${reason}-debounced`, debouncedSnapshot);
     }, MIN_INTERVAL_MS - elapsed);
 };
 

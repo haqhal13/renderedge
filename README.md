@@ -96,6 +96,7 @@ The bot currently uses the **Polymarket Data API** to monitor trader activity an
 ### Web App Integration
 
 - **Built-in HTTP API** – Every deployment exposes `/health` and `/state` (JSON) so dashboards can poll without touching the filesystem.
+- **Streaming dashboard** – Visit `/dashboard` (or subscribe to `/events`) to watch trades update live via server-sent events; works even if you never wire an external web app.
 - **Push updates** – Set `WEBAPP_PUSH_URL` (and optional `WEBAPP_API_KEY`) to stream the latest snapshot to your own web service whenever trades, positions, or health data change.
 - **Render-friendly** – The runtime no longer writes CSV files; everything is kept in memory and streamed over HTTP/webhooks.
 

@@ -126,3 +126,25 @@ export const getSnapshot = (): AppStateSnapshot => ({
     myPortfolio: state.myPortfolio ? { ...state.myPortfolio } : undefined,
     health: state.health ? JSON.parse(JSON.stringify(state.health)) : undefined,
 });
+
+type StateListener = (snapshot: AppStateSnapshot, reason: string) => void;
+const listeners = new Set<StateListener>();
+
+export const subscribeToState = (listener: StateListener): (() => void) => {
+    listeners.add(listener);
+    return () => {
+        listeners.delete(listener);
+    };
+};
+
+export const emitStateSnapshot = (reason: string): AppStateSnapshot => {
+    const snapshot = getSnapshot();
+    for (const listener of listeners) {
+        try {
+            listener(snapshot, reason);
+        } catch (error) {
+            console.error('State listener error:', error);
+        }
+    }
+    return snapshot;
+};
