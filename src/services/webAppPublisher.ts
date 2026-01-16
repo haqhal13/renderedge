@@ -73,6 +73,45 @@ const mapPortfolio = (snapshot: AppStateSnapshot) => {
     };
 };
 
+const mapPnlHistory = (pnlHistory: AppStateSnapshot['pnlHistory'] = []) =>
+    pnlHistory.map((entry) => ({
+        marketName: entry.marketName,
+        conditionId: entry.conditionId || '',
+        totalPnl: entry.totalPnL,
+        pnlPercent: entry.pnlPercent,
+        outcome: entry.outcome,
+        timestamp: entry.timestamp,
+        marketType: entry.marketType,
+    }));
+
+const mapMarketSummaries = (markets: AppStateSnapshot['marketSummaries'] = []) =>
+    markets.map((m) => ({
+        marketKey: m.marketKey,
+        marketName: m.marketName,
+        category: m.category,
+        endDate: m.endDate,
+        timeRemaining: m.timeRemaining,
+        isExpired: m.isExpired,
+        priceUp: m.priceUp,
+        priceDown: m.priceDown,
+        sharesUp: m.sharesUp,
+        sharesDown: m.sharesDown,
+        investedUp: m.investedUp,
+        investedDown: m.investedDown,
+        currentValueUp: m.currentValueUp,
+        currentValueDown: m.currentValueDown,
+        pnlUp: m.pnlUp,
+        pnlDown: m.pnlDown,
+        pnlUpPercent: m.pnlUpPercent,
+        pnlDownPercent: m.pnlDownPercent,
+        totalPnL: m.totalPnL,
+        totalPnLPercent: m.totalPnLPercent,
+        tradesUp: m.tradesUp,
+        tradesDown: m.tradesDown,
+        upPercent: m.upPercent,
+        downPercent: m.downPercent,
+    }));
+
 const buildPayload = (snapshot: AppStateSnapshot) => ({
     botName: process.env.BOT_NAME || 'EdgeBotPro',
     updatedAt: snapshot.updatedAt,
@@ -83,6 +122,9 @@ const buildPayload = (snapshot: AppStateSnapshot) => ({
     health: snapshot.health ?? {},
     watchlist: mapWatchlist(),
     watchlistCount: watchlistManager.getCount(),
+    // Add pnlHistory and marketSummaries for dashboard display
+    pnlHistory: mapPnlHistory(snapshot.pnlHistory),
+    marketSummaries: mapMarketSummaries(snapshot.marketSummaries),
 });
 
 const sendPayload = async (reason: string, snapshot: AppStateSnapshot): Promise<void> => {
