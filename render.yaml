@@ -11,8 +11,10 @@ services:
         value: 20
       - key: PORT
         value: 3000
-      - key: MODE
-        value: WATCH
+      - key: PAPER_MODE
+        sync: false
+      - key: TRACK_ONLY_MODE
+        sync: false
       - key: USER_ADDRESSES
         sync: false
       - key: PROXY_WALLET
@@ -27,5 +29,9 @@ services:
         sync: false
       - key: WEBAPP_API_KEY
         sync: false
+      - key: BOT_METRICS_URL
+        sync: false
       - key: BOT_ID
-        value: watcher
+        value: gabagool
+      - key: BOT_NAME
+        value: gabagool22

@@ -424,6 +424,84 @@ export const main = async () => {
             Logger.info('Paper trading: Independent strategy, trades on same market types as watcher');
             Logger.separator();
             paperTradeMonitor();
+
+            // Start external bot performance reporter for WEBAPP dashboard (same as WATCH mode)
+            try {
+                const watcherPnLTrackerModule = await import('./services/watcherPnLTracker');
+                const watcherPnLTracker = watcherPnLTrackerModule.default;
+
+                // Import appState setters for syncing data to webAppPublisher
+                const appStateModule = await import('./services/appState');
+                const { setMarketSummaries, setPnlHistory } = appStateModule;
+
+                botMetricsInterval = setInterval(async () => {
+                    try {
+                        const snapshot = watcherPnLTracker.getDashboardSnapshot();
+
+                        // Sync data to appState for webAppPublisher
+                        const pnlHistoryForAppState = snapshot.pnlHistory.map((entry) => {
+                            const hasTimeRange = entry.marketName.match(/\d{1,2}:\d{2}(AM|PM)-\d{1,2}:\d{2}(AM|PM)/i);
+                            const is15Min = hasTimeRange !== null;
+                            const marketType: '5m' | '15m' | '1h' | 'OTHER' = is15Min ? '15m' : '15m';
+
+                            return {
+                                marketName: entry.marketName,
+                                totalPnL: entry.totalPnl,
+                                pnlPercent: entry.pnlPercent,
+                                outcome: entry.outcome as 'UP' | 'DOWN',
+                                timestamp: entry.timestamp,
+                                marketType,
+                                conditionId: entry.conditionId || '',
+                            };
+                        });
+
+                        setPnlHistory(pnlHistoryForAppState);
+
+                        const payload = {
+                            botId: 'gabagool',
+                            botName: 'gabagool22',
+                            apiKey: 'betabot-dashboard-key',
+                            portfolio: {
+                                balance: 0,
+                                totalInvested: snapshot.totalInvested,
+                                totalPnL: snapshot.totalPnL,
+                                totalPnLPercent: snapshot.totalInvested > 0 ? (snapshot.totalPnL / snapshot.totalInvested) * 100 : 0,
+                                totalTrades: snapshot.totalTrades,
+                                pnl15m: snapshot.pnl15m,
+                                pnl15mPercent: snapshot.pnl15mPercent,
+                                trades15m: snapshot.trades15m,
+                                pnl1h: snapshot.pnl1h,
+                                pnl1hPercent: snapshot.pnl1hPercent,
+                                trades1h: snapshot.trades1h,
+                            },
+                            pnlHistory: snapshot.pnlHistory.map((entry) => ({
+                                marketName: entry.marketName,
+                                conditionId: entry.conditionId || '',
+                                totalPnl: entry.totalPnl,
+                                pnlPercent: entry.pnlPercent,
+                                priceUp: entry.priceUp || 0,
+                                priceDown: entry.priceDown || 0,
+                                sharesUp: entry.sharesUp || 0,
+                                sharesDown: entry.sharesDown || 0,
+                                outcome: entry.outcome,
+                                timestamp: entry.timestamp,
+                                marketType: '15m',
+                            })),
+                            currentMarkets: [],
+                        };
+
+                        const metricsUrl = process.env.BOT_METRICS_URL || 'http://localhost:3000/api/bot';
+                        await axios.post(metricsUrl, payload, {
+                            headers: { 'Content-Type': 'application/json' },
+                        });
+                    } catch (err) {
+                        Logger.warning(`Failed to send paper metrics to dashboard: ${err instanceof Error ? err.message : String(err)}`);
+                    }
+                }, 1500);
+                Logger.info('Paper mode metrics reporter started');
+            } catch (err) {
+                Logger.warning(`Failed to initialize paper mode metrics reporter: ${err instanceof Error ? err.message : String(err)}`);
+            }
         } else if (ENV.TRACK_ONLY_MODE) {
             // Watch mode
             Logger.info('Starting trade monitor...');
