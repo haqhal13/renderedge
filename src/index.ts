@@ -464,6 +464,10 @@ export const main = async () => {
                     );
                 }
 
+                // Import appState setters for syncing data to webAppPublisher
+                const appStateModule = await import('./services/appState');
+                const { setMarketSummaries, setPnlHistory } = appStateModule;
+
                 botMetricsInterval = setInterval(async () => {
                     try {
                         // Get snapshot before recording investment (to get current investment data)
@@ -758,9 +762,62 @@ export const main = async () => {
                                 ? (unrealizedPnL1h / unrealizedInvested1h) * 100
                                 : 0;
 
+                        // Sync data to appState so webAppPublisher can send it
+                        // This ensures both /api/bot and /api/update endpoints have the same data
+                        const marketSummariesForAppState = currentMarkets.map((m) => ({
+                            marketKey: m.marketKey,
+                            marketName: m.marketName,
+                            category: m.category,
+                            endDate: m.endDate ?? undefined,
+                            timeRemaining: m.timeRemaining,
+                            isExpired: m.isExpired,
+                            priceUp: m.priceUp ?? 0,
+                            priceDown: m.priceDown ?? 0,
+                            sharesUp: m.sharesUp,
+                            sharesDown: m.sharesDown,
+                            investedUp: m.investedUp,
+                            investedDown: m.investedDown,
+                            currentValueUp: m.currentValueUp,
+                            currentValueDown: m.currentValueDown,
+                            pnlUp: m.pnlUp,
+                            pnlDown: m.pnlDown,
+                            pnlUpPercent: m.pnlUpPercent,
+                            pnlDownPercent: m.pnlDownPercent,
+                            totalPnL: m.totalPnL,
+                            totalPnLPercent: m.totalPnLPercent,
+                            tradesUp: m.tradesUp,
+                            tradesDown: m.tradesDown,
+                            upPercent: m.upPercent,
+                            downPercent: m.downPercent,
+                        }));
+
+                        const pnlHistoryForAppState = snapshot.pnlHistory.map((entry) => {
+                            const hasTimeRange = entry.marketName.match(/\d{1,2}:\d{2}(AM|PM)-\d{1,2}:\d{2}(AM|PM)/i);
+                            const is15Min = hasTimeRange !== null;
+                            const is1Hour =
+                                (entry.marketName.includes('Bitcoin Up or Down') ||
+                                    entry.marketName.includes('Ethereum Up or Down')) &&
+                                !is15Min &&
+                                entry.marketName.match(/\d{1,2}(AM|PM) ET/i) !== null;
+                            const marketType: '5m' | '15m' | '1h' | 'OTHER' = is15Min ? '15m' : is1Hour ? '1h' : '15m';
+
+                            return {
+                                marketName: entry.marketName,
+                                totalPnL: entry.totalPnl,
+                                pnlPercent: entry.pnlPercent,
+                                outcome: entry.outcome as 'UP' | 'DOWN',
+                                timestamp: entry.timestamp,
+                                marketType,
+                                conditionId: entry.conditionId || '',
+                            };
+                        });
+
+                        setMarketSummaries(marketSummariesForAppState);
+                        setPnlHistory(pnlHistoryForAppState);
+
                         const payload = {
-                            botId: 'edgebot',
-                            botName: 'Gabagool22',
+                            botId: 'gabagool',
+                            botName: 'gabagool22',
                             apiKey: 'betabot-dashboard-key',
                             portfolio: {
                                 // Primary portfolio metrics (prefer live/open PnL to match terminal dashboard)
