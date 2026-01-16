@@ -3346,6 +3346,128 @@ class MarketTracker {
     }
 
     /**
+     * Get markets data for WEBAPP - uses same calculation as terminal display
+     * This ensures WEBAPP shows identical data to what's displayed in terminal
+     */
+    getMarketsForWebApp(): Array<{
+        marketKey: string;
+        marketName: string;
+        category: string;
+        endDate?: number;
+        timeRemaining: string;
+        isExpired: boolean;
+        priceUp: number;
+        priceDown: number;
+        sharesUp: number;
+        sharesDown: number;
+        investedUp: number;
+        investedDown: number;
+        currentValueUp: number;
+        currentValueDown: number;
+        pnlUp: number;
+        pnlDown: number;
+        pnlUpPercent: number;
+        pnlDownPercent: number;
+        totalPnL: number;
+        totalPnLPercent: number;
+        tradesUp: number;
+        tradesDown: number;
+        upPercent: number;
+        downPercent: number;
+    }> {
+        const now = Date.now();
+        const sortedMarkets = Array.from(this.markets.values())
+            .filter((m) => (m.sharesUp > 0 || m.sharesDown > 0))
+            .sort((a, b) => {
+                // Sort by end date (soonest first), then by invested amount
+                if (a.endDate && b.endDate) {
+                    return a.endDate - b.endDate;
+                }
+                const aInvested = a.investedUp + a.investedDown;
+                const bInvested = b.investedUp + b.investedDown;
+                return bInvested - aInvested;
+            });
+
+        return sortedMarkets.map((market) => {
+            const totalInvested = market.investedUp + market.investedDown;
+            const totalCostBasis = market.totalCostUp + market.totalCostDown;
+            const upPercent = totalInvested > 0 ? (market.investedUp / totalInvested) * 100 : 0;
+            const downPercent = totalInvested > 0 ? (market.investedDown / totalInvested) * 100 : 0;
+
+            // Calculate unrealized PnL - EXACT same logic as terminal display
+            let currentValueUp = 0;
+            let currentValueDown = 0;
+            let pnlUp = 0;
+            let pnlDown = 0;
+
+            const hasValidPriceUp = market.currentPriceUp !== undefined &&
+                                   market.currentPriceUp > 0 &&
+                                   market.currentPriceUp <= 1;
+            const hasValidPriceDown = market.currentPriceDown !== undefined &&
+                                     market.currentPriceDown > 0 &&
+                                     market.currentPriceDown <= 1;
+
+            if (hasValidPriceUp && market.sharesUp > 0 && market.currentPriceUp !== undefined) {
+                currentValueUp = market.sharesUp * market.currentPriceUp;
+                pnlUp = currentValueUp - market.totalCostUp;
+            }
+
+            if (hasValidPriceDown && market.sharesDown > 0 && market.currentPriceDown !== undefined) {
+                currentValueDown = market.sharesDown * market.currentPriceDown;
+                pnlDown = currentValueDown - market.totalCostDown;
+            }
+
+            const totalPnL = pnlUp + pnlDown;
+            const pnlUpPercent = market.totalCostUp > 0 ? (pnlUp / market.totalCostUp) * 100 : 0;
+            const pnlDownPercent = market.totalCostDown > 0 ? (pnlDown / market.totalCostDown) * 100 : 0;
+            const totalPnLPercent = totalCostBasis > 0 ? (totalPnL / totalCostBasis) * 100 : 0;
+
+            // Calculate time remaining - EXACT same logic as terminal display
+            let timeRemaining = '';
+            let isExpired = false;
+            if (market.endDate && market.endDate > 0) {
+                const endDateMs = market.endDate < 10000000000 ? market.endDate * 1000 : market.endDate;
+                const timeLeftMs = endDateMs - now;
+                if (timeLeftMs > 0) {
+                    const mins = Math.floor(timeLeftMs / 60000);
+                    const secs = Math.floor((timeLeftMs % 60000) / 1000);
+                    timeRemaining = `${mins}m ${secs}s`;
+                } else {
+                    timeRemaining = 'Expired';
+                    isExpired = true;
+                }
+            }
+
+            return {
+                marketKey: market.marketKey,
+                marketName: market.marketName,
+                category: market.category || '',
+                endDate: market.endDate,
+                timeRemaining,
+                isExpired,
+                priceUp: market.currentPriceUp || 0,
+                priceDown: market.currentPriceDown || 0,
+                sharesUp: market.sharesUp,
+                sharesDown: market.sharesDown,
+                investedUp: market.investedUp,
+                investedDown: market.investedDown,
+                currentValueUp,
+                currentValueDown,
+                pnlUp,
+                pnlDown,
+                pnlUpPercent,
+                pnlDownPercent,
+                totalPnL,
+                totalPnLPercent,
+                tradesUp: market.tradesUp,
+                tradesDown: market.tradesDown,
+                upPercent,
+                downPercent,
+            };
+        });
+    }
+
+    /**
      * Clear all stats
      */
     clear(): void {

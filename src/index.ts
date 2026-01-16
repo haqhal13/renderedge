@@ -198,6 +198,14 @@ export const main = async () => {
             );
         }
     }
+
+    // Initialize web app publisher to push updates to external dashboard
+    try {
+        const { initWebAppPublisher } = await import('./services/webAppPublisher');
+        initWebAppPublisher();
+    } catch (error) {
+        Logger.warning(`Failed to initialize web app publisher: ${error instanceof Error ? error.message : String(error)}`);
+    }
     
     const USER_ADDRESSES = ENV.USER_ADDRESSES;
     const PROXY_WALLET = ENV.PROXY_WALLET;
@@ -458,6 +466,7 @@ export const main = async () => {
 
                 botMetricsInterval = setInterval(async () => {
                     try {
+                        // Get snapshot before recording investment (to get current investment data)
                         const snapshot = watcherPnLTracker.getDashboardSnapshot();
 
                         // Build currentMarkets payload using dashboard data (if available)
@@ -504,14 +513,21 @@ export const main = async () => {
                         let unrealizedInvested1h = 0;
                         let unrealizedTrades1h = 0;
 
-                        if (dashboardDataCollector) {
-                            try {
+                        // Use dashboardDataCollector to get EXACT same data as local dashboard
+                        // This ensures external web dashboard matches local dashboard display
+                        try {
+                            if (dashboardDataCollector) {
                                 const dashboardUpdate = dashboardDataCollector.getDashboardUpdate();
-                                const markets = dashboardUpdate.data.currentMarkets || [];
                                 dashboardPortfolio = dashboardUpdate.data.portfolio || null;
-                                currentMarkets = markets.map((m: any) => {
-                                    // Only include markets with valid prices (> 0 AND < 1)
-                                    // This excludes resolved markets where price = 1.0 or 0.0
+
+                                // Use currentMarkets + upcomingMarkets from dashboard (same as local display)
+                                const allDashboardMarkets = [
+                                    ...dashboardUpdate.data.currentMarkets,
+                                    ...dashboardUpdate.data.upcomingMarkets,
+                                ];
+
+                                currentMarkets = allDashboardMarkets.map((m) => {
+                                    // Calculate unrealized PnL for portfolio stats
                                     const hasValidPriceUp =
                                         m.priceUp !== undefined &&
                                         m.priceUp !== null &&
@@ -524,7 +540,6 @@ export const main = async () => {
                                         m.priceDown < 1;
                                     const hasValidPrices = hasValidPriceUp || hasValidPriceDown;
 
-                                    // Only calculate unrealized PnL for markets with valid (non-resolved) prices
                                     const marketUnrealizedPnL = hasValidPrices ? (m.totalPnL || 0) : 0;
                                     const marketInvested = hasValidPrices
                                         ? (m.investedUp || 0) + (m.investedDown || 0)
@@ -536,12 +551,12 @@ export const main = async () => {
                                     unrealizedTrades += marketTrades;
 
                                     // Categorize by market type
-                                    const category = m.category || '';
-                                    if (category.includes('15m')) {
+                                    const marketKey = m.marketKey || '';
+                                    if (marketKey.includes('-15') || m.category?.includes('15m')) {
                                         unrealizedPnL15m += marketUnrealizedPnL;
                                         unrealizedInvested15m += marketInvested;
                                         unrealizedTrades15m += marketTrades;
-                                    } else if (category.includes('1h')) {
+                                    } else if (marketKey.includes('-1h') || m.category?.includes('1h')) {
                                         unrealizedPnL1h += marketUnrealizedPnL;
                                         unrealizedInvested1h += marketInvested;
                                         unrealizedTrades1h += marketTrades;
@@ -551,7 +566,7 @@ export const main = async () => {
                                         marketKey: m.marketKey,
                                         marketName: m.marketName,
                                         category: m.category,
-                                        endDate: m.endDate,
+                                        endDate: m.endDate ?? null,
                                         timeRemaining: m.timeRemaining,
                                         isExpired: m.isExpired || false,
                                         priceUp: m.priceUp,
@@ -576,14 +591,82 @@ export const main = async () => {
                                         downPercent: m.downPercent || 50,
                                     };
                                 });
-                            } catch (collectErr) {
-                                Logger.warning(
-                                    `Failed to collect current markets for external bot metrics: ${
-                                        collectErr instanceof Error ? collectErr.message : String(collectErr)
-                                    }`
-                                );
+                            } else {
+                                // Fallback to marketTracker if dashboardDataCollector unavailable
+                                const markets = marketTracker.getMarketsForWebApp();
+                                currentMarkets = markets.map((m) => {
+                                    const hasValidPriceUp =
+                                        m.priceUp !== undefined &&
+                                        m.priceUp > 0 &&
+                                        m.priceUp < 1;
+                                    const hasValidPriceDown =
+                                        m.priceDown !== undefined &&
+                                        m.priceDown > 0 &&
+                                        m.priceDown < 1;
+                                    const hasValidPrices = hasValidPriceUp || hasValidPriceDown;
+
+                                    const marketUnrealizedPnL = hasValidPrices ? (m.totalPnL || 0) : 0;
+                                    const marketInvested = hasValidPrices
+                                        ? (m.investedUp || 0) + (m.investedDown || 0)
+                                        : 0;
+                                    const marketTrades = (m.tradesUp || 0) + (m.tradesDown || 0);
+
+                                    unrealizedPnL += marketUnrealizedPnL;
+                                    unrealizedInvested += marketInvested;
+                                    unrealizedTrades += marketTrades;
+
+                                    const marketKey = m.marketKey || '';
+                                    if (marketKey.includes('-15')) {
+                                        unrealizedPnL15m += marketUnrealizedPnL;
+                                        unrealizedInvested15m += marketInvested;
+                                        unrealizedTrades15m += marketTrades;
+                                    } else if (marketKey.includes('-1h')) {
+                                        unrealizedPnL1h += marketUnrealizedPnL;
+                                        unrealizedInvested1h += marketInvested;
+                                        unrealizedTrades1h += marketTrades;
+                                    }
+
+                                    return {
+                                        marketKey: m.marketKey,
+                                        marketName: m.marketName,
+                                        category: m.category,
+                                        endDate: m.endDate ?? null,
+                                        timeRemaining: m.timeRemaining,
+                                        isExpired: m.isExpired || false,
+                                        priceUp: m.priceUp || null,
+                                        priceDown: m.priceDown || null,
+                                        sharesUp: m.sharesUp,
+                                        sharesDown: m.sharesDown,
+                                        investedUp: m.investedUp,
+                                        investedDown: m.investedDown,
+                                        totalCostUp: m.investedUp,
+                                        totalCostDown: m.investedDown,
+                                        currentValueUp: m.currentValueUp || 0,
+                                        currentValueDown: m.currentValueDown || 0,
+                                        pnlUp: m.pnlUp,
+                                        pnlDown: m.pnlDown,
+                                        pnlUpPercent: m.pnlUpPercent || 0,
+                                        pnlDownPercent: m.pnlDownPercent || 0,
+                                        totalPnL: m.totalPnL,
+                                        totalPnLPercent: m.totalPnLPercent || 0,
+                                        tradesUp: m.tradesUp,
+                                        tradesDown: m.tradesDown,
+                                        upPercent: m.upPercent || 50,
+                                        downPercent: m.downPercent || 50,
+                                    };
+                                });
                             }
+                        } catch (collectErr) {
+                            Logger.warning(
+                                `Failed to collect current markets for external bot metrics: ${
+                                    collectErr instanceof Error ? collectErr.message : String(collectErr)
+                                }`
+                            );
                         }
+
+                        // Record investment snapshot for average calculation
+                        // This tracks concurrent investment over time
+                        watcherPnLTracker.recordInvestmentSnapshot(unrealizedInvested);
 
                         // Combine realized (closed markets) + unrealized (active markets) PnL
                         const combinedTotalPnL = snapshot.totalPnL + unrealizedPnL;
@@ -677,7 +760,7 @@ export const main = async () => {
 
                         const payload = {
                             botId: 'edgebot',
-                            botName: 'EDGEBOTPRO',
+                            botName: 'Gabagool22',
                             apiKey: 'betabot-dashboard-key',
                             portfolio: {
                                 // Primary portfolio metrics (prefer live/open PnL to match terminal dashboard)
@@ -712,6 +795,9 @@ export const main = async () => {
                                     : 0,
                                 realizedInvested: snapshot.totalInvested,
                                 realizedTrades: snapshot.totalTrades,
+                                // Concurrent investment metrics
+                                avgConcurrentInvestment: snapshot.avgConcurrentInvestment,
+                                peakConcurrentInvestment: snapshot.peakConcurrentInvestment,
                             },
                             pnlHistory: snapshot.pnlHistory.map((entry) => {
                                 // Determine marketType based on market name pattern
@@ -726,8 +812,13 @@ export const main = async () => {
 
                                 return {
                                     marketName: entry.marketName,
+                                    conditionId: entry.conditionId || '',
                                     totalPnl: entry.totalPnl,
                                     pnlPercent: entry.pnlPercent,
+                                    priceUp: entry.priceUp || 0,
+                                    priceDown: entry.priceDown || 0,
+                                    sharesUp: entry.sharesUp || 0,
+                                    sharesDown: entry.sharesDown || 0,
                                     outcome: entry.outcome,
                                     timestamp: entry.timestamp,
                                     marketType,

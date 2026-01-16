@@ -57,6 +57,12 @@ class WatcherPnLTracker {
     private loggedMarkets: Set<string> = new Set();
     private reportPath: string;
     private csvPath: string;
+    private pnlHistoryFilePath: string;
+
+    // Track concurrent investment snapshots for average calculation
+    private investmentSnapshots: { timestamp: number; amount: number }[] = [];
+    private maxInvestmentSnapshots: number = 1000; // Keep last 1000 snapshots
+    private peakConcurrentInvestment: number = 0;
 
     constructor() {
         const logsDir = path.join(process.cwd(), 'logs');
@@ -72,12 +78,88 @@ class WatcherPnLTracker {
         const runId = getRunId();
         this.reportPath = path.join(watcherDir, `Watcher PnL Report_${runId}.txt`);
         this.csvPath = path.join(logsDir, 'pnl_records.csv');
+        // Shared pnl_history.json file (persists across runs)
+        this.pnlHistoryFilePath = path.join(watcherDir, 'pnl_history.json');
 
         // Initialize CSV file
         this.initializePnlCsv();
 
+        // Load persisted PnL history from disk
+        this.loadPnLHistory();
+
         // Generate initial empty report
         this.generateFormattedPnLReport();
+    }
+
+    /**
+     * Load PnL history from persistent JSON file
+     */
+    private loadPnLHistory(): void {
+        try {
+            if (fs.existsSync(this.pnlHistoryFilePath)) {
+                const data = fs.readFileSync(this.pnlHistoryFilePath, 'utf8');
+                const parsed = JSON.parse(data);
+
+                // Convert array back to Map
+                if (Array.isArray(parsed)) {
+                    this.marketPnLData = new Map(parsed.map(item => [item.conditionId || item.marketKey, item]));
+                    // Also restore loggedMarkets to prevent duplicates
+                    this.loggedMarkets = new Set(parsed.map(item => item.conditionId || item.marketKey));
+                    Logger.info(`Loaded ${this.marketPnLData.size} PnL history entries from disk`);
+                }
+            }
+        } catch (error) {
+            Logger.error(`Failed to load PnL history: ${error}`);
+        }
+    }
+
+    /**
+     * Save PnL history to persistent JSON file
+     */
+    private savePnLHistory(): void {
+        try {
+            const data = Array.from(this.marketPnLData.values());
+            fs.writeFileSync(this.pnlHistoryFilePath, JSON.stringify(data, null, 2), 'utf8');
+        } catch (error) {
+            Logger.error(`Failed to save PnL history: ${error}`);
+        }
+    }
+
+    /**
+     * Record a snapshot of the current concurrent investment amount.
+     * Call this periodically (e.g., every update cycle) to track investment over time.
+     */
+    recordInvestmentSnapshot(currentInvestment: number): void {
+        const now = Date.now();
+
+        // Update peak investment
+        if (currentInvestment > this.peakConcurrentInvestment) {
+            this.peakConcurrentInvestment = currentInvestment;
+        }
+
+        // Add snapshot
+        this.investmentSnapshots.push({ timestamp: now, amount: currentInvestment });
+
+        // Trim old snapshots if needed
+        if (this.investmentSnapshots.length > this.maxInvestmentSnapshots) {
+            this.investmentSnapshots = this.investmentSnapshots.slice(-this.maxInvestmentSnapshots);
+        }
+    }
+
+    /**
+     * Get the average concurrent investment from recorded snapshots
+     */
+    getAvgConcurrentInvestment(): number {
+        if (this.investmentSnapshots.length === 0) return 0;
+        const sum = this.investmentSnapshots.reduce((acc, s) => acc + s.amount, 0);
+        return sum / this.investmentSnapshots.length;
+    }
+
+    /**
+     * Get the peak concurrent investment
+     */
+    getPeakConcurrentInvestment(): number {
+        return this.peakConcurrentInvestment;
     }
 
     /**
@@ -199,6 +281,9 @@ class WatcherPnLTracker {
 
             // Log to CSV (same format as paper mode)
             this.logPnlToCsv(marketName, settledPnl);
+
+            // Save PnL history to disk for persistence
+            this.savePnLHistory();
 
             // Regenerate report immediately
             this.generateFormattedPnLReport();
@@ -474,10 +559,17 @@ class WatcherPnLTracker {
         pnl1h: number;
         pnl1hPercent: number;
         trades1h: number;
+        avgConcurrentInvestment: number;
+        peakConcurrentInvestment: number;
         pnlHistory: {
             marketName: string;
+            conditionId: string;
             totalPnl: number;
             pnlPercent: number;
+            priceUp: number;
+            priceDown: number;
+            sharesUp: number;
+            sharesDown: number;
             outcome: 'UP' | 'DOWN' | 'WIN' | 'LOSS';
             timestamp: number;
         }[];
@@ -496,8 +588,13 @@ class WatcherPnLTracker {
 
         const history: {
             marketName: string;
+            conditionId: string;
             totalPnl: number;
             pnlPercent: number;
+            priceUp: number;
+            priceDown: number;
+            sharesUp: number;
+            sharesDown: number;
             outcome: 'UP' | 'DOWN' | 'WIN' | 'LOSS';
             timestamp: number;
         }[] = [];
@@ -549,8 +646,13 @@ class WatcherPnLTracker {
 
             history.push({
                 marketName: data.marketName,
+                conditionId: data.conditionId || '',
                 totalPnl: data.totalPnl,
                 pnlPercent: data.pnlPercent,
+                priceUp: data.priceUp,
+                priceDown: data.priceDown,
+                sharesUp: data.sharesUp,
+                sharesDown: data.sharesDown,
                 outcome,
                 timestamp: data.timestamp,
             });
@@ -575,6 +677,8 @@ class WatcherPnLTracker {
             pnl1h,
             pnl1hPercent,
             trades1h,
+            avgConcurrentInvestment: this.getAvgConcurrentInvestment(),
+            peakConcurrentInvestment: this.getPeakConcurrentInvestment(),
             pnlHistory: history,
         };
     }
@@ -586,6 +690,33 @@ class WatcherPnLTracker {
         this.marketPnLData.clear();
         this.loggedMarkets.clear();
         this.generateFormattedPnLReport();
+    }
+
+    /**
+     * Full reset - clears all in-memory data AND deletes persisted pnl_history.json
+     * Use this when resetting the bot from external webapp
+     */
+    resetAll(): void {
+        // Clear in-memory data
+        this.marketPnLData.clear();
+        this.loggedMarkets.clear();
+        this.investmentSnapshots = [];
+        this.peakConcurrentInvestment = 0;
+
+        // Delete the persistent pnl_history.json file
+        try {
+            if (fs.existsSync(this.pnlHistoryFilePath)) {
+                fs.unlinkSync(this.pnlHistoryFilePath);
+                Logger.info(`Deleted PnL history file: ${this.pnlHistoryFilePath}`);
+            }
+        } catch (error) {
+            Logger.error(`Failed to delete PnL history file: ${error}`);
+        }
+
+        // Regenerate empty report
+        this.generateFormattedPnLReport();
+
+        Logger.info('WatcherPnLTracker fully reset (memory + disk)');
     }
 }
 

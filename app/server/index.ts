@@ -173,7 +173,8 @@ export class AppServer {
     }
 
     // API Routes for watchlist management
-    if (url.startsWith('/api/')) {
+    // Support both /api/watchlist/* and /watchlist/* paths
+    if (url.startsWith('/api/') || url.startsWith('/watchlist')) {
       this.handleApiRequest(req, res, url, method);
       return;
     }
@@ -220,7 +221,8 @@ export class AppServer {
   }
 
   /**
-   * Handle API requests for watchlist management
+   * Handle API requests for watchlist management and reset
+   * Supports both /api/watchlist/* and /watchlist/* paths
    */
   private async handleApiRequest(
     req: IncomingMessage,
@@ -228,19 +230,125 @@ export class AppServer {
     url: string,
     method: string
   ): Promise<void> {
+    // Handle reset endpoint
+    if (url === '/api/reset' && method === 'POST') {
+      await this.handleResetRequest(req, res);
+      return;
+    }
+
     // Lazy import watchlist manager to avoid circular dependencies
     const watchlistManager = (await import('../../src/services/watchlistManager')).default;
 
     try {
-      // GET /api/watchlist - Get all watched addresses
-      if (url === '/api/watchlist' && method === 'GET') {
+      // GET /watchlist or /api/watchlist - Get all watched addresses
+      if ((url === '/api/watchlist' || url === '/watchlist') && method === 'GET') {
         const data = watchlistManager.toJSON();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(data));
+        res.end(JSON.stringify({
+          success: true,
+          data: {
+            addresses: data.addresses,
+            count: data.addresses.length,
+            lastModified: data.lastModified,
+          },
+        }));
         return;
       }
 
-      // POST /api/watchlist - Add a new address
+      // POST /watchlist/add or /api/watchlist/add - Add a new address
+      if ((url === '/api/watchlist/add' || url === '/watchlist/add') && method === 'POST') {
+        const body = await this.parseBody(req);
+        const { address, alias } = body;
+
+        if (!address) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Address is required' }));
+          return;
+        }
+
+        const success = watchlistManager.addAddress(address, alias);
+        if (success) {
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Address added', data: watchlistManager.toJSON() }));
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Failed to add address (invalid or duplicate)' }));
+        }
+        return;
+      }
+
+      // POST /watchlist/remove or /api/watchlist/remove - Remove an address
+      if ((url === '/api/watchlist/remove' || url === '/watchlist/remove') && method === 'POST') {
+        const body = await this.parseBody(req);
+        const { address } = body;
+
+        if (!address) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Address is required' }));
+          return;
+        }
+
+        const success = watchlistManager.removeAddress(address);
+        if (success) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Address removed', data: watchlistManager.toJSON() }));
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Address not found' }));
+        }
+        return;
+      }
+
+      // POST /watchlist/toggle or /api/watchlist/toggle - Toggle address enabled/disabled
+      if ((url === '/api/watchlist/toggle' || url === '/watchlist/toggle') && method === 'POST') {
+        const body = await this.parseBody(req);
+        const { address, enabled } = body;
+
+        if (!address) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Address is required' }));
+          return;
+        }
+
+        const success = watchlistManager.toggleAddress(address, enabled);
+        if (success) {
+          const entry = watchlistManager.getAddress(address);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            message: `Address ${entry?.enabled ? 'enabled' : 'disabled'}`,
+            data: watchlistManager.toJSON()
+          }));
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Address not found' }));
+        }
+        return;
+      }
+
+      // POST /watchlist/alias or /api/watchlist/alias - Set alias for address
+      if ((url === '/api/watchlist/alias' || url === '/watchlist/alias') && method === 'POST') {
+        const body = await this.parseBody(req);
+        const { address, alias } = body;
+
+        if (!address || !alias) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Address and alias are required' }));
+          return;
+        }
+
+        const success = watchlistManager.setAlias(address, alias);
+        if (success) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Alias set', data: watchlistManager.toJSON() }));
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Address not found' }));
+        }
+        return;
+      }
+
+      // POST /api/watchlist - Add a new address (legacy endpoint)
       if (url === '/api/watchlist' && method === 'POST') {
         const body = await this.parseBody(req);
         const { address, alias } = body;
@@ -262,7 +370,7 @@ export class AppServer {
         return;
       }
 
-      // DELETE /api/watchlist/:address - Remove an address
+      // DELETE /api/watchlist/:address - Remove an address (legacy endpoint)
       if (url.startsWith('/api/watchlist/') && method === 'DELETE') {
         const address = decodeURIComponent(url.replace('/api/watchlist/', ''));
         const success = watchlistManager.removeAddress(address);
@@ -277,7 +385,7 @@ export class AppServer {
         return;
       }
 
-      // POST /api/watchlist/:address/toggle - Toggle address enabled/disabled
+      // POST /api/watchlist/:address/toggle - Toggle address enabled/disabled (legacy endpoint)
       if (url.match(/^\/api\/watchlist\/[^/]+\/toggle$/) && method === 'POST') {
         const address = decodeURIComponent(url.replace('/api/watchlist/', '').replace('/toggle', ''));
         const body = await this.parseBody(req);
@@ -294,7 +402,7 @@ export class AppServer {
         return;
       }
 
-      // POST /api/watchlist/:address/alias - Set alias for address
+      // POST /api/watchlist/:address/alias - Set alias for address (legacy endpoint)
       if (url.match(/^\/api\/watchlist\/[^/]+\/alias$/) && method === 'POST') {
         const address = decodeURIComponent(url.replace('/api/watchlist/', '').replace('/alias', ''));
         const body = await this.parseBody(req);
@@ -460,6 +568,56 @@ export class AppServer {
     } catch (err) {
       console.error('[APP] Error sending update:', err);
     }
+  }
+
+  /**
+   * Handle reset request from external webapp
+   */
+  private async handleResetRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body = '';
+
+    req.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+
+    req.on('end', async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const target = data.target || 'gabagool';
+
+        console.log(`[APP] Reset requested: ${target}`);
+
+        // Import and reset the watcherPnLTracker
+        try {
+          const watcherPnLTracker = (await import('../../src/services/watcherPnLTracker')).default;
+          watcherPnLTracker.resetAll();
+          console.log('[APP] WatcherPnLTracker reset complete');
+        } catch (err) {
+          console.error('[APP] Error resetting watcherPnLTracker:', err);
+        }
+
+        // Reset dashboard data collector
+        try {
+          dashboardDataCollector.reset();
+          console.log('[APP] DashboardDataCollector reset complete');
+        } catch (err) {
+          console.error('[APP] Error resetting dashboardDataCollector:', err);
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: `Reset triggered for Gabagool22` }));
+      } catch (e) {
+        console.error('[APP] Error handling reset:', e);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON or reset failed' }));
+      }
+    });
+
+    req.on('error', (err) => {
+      console.error('[APP] Error reading reset request:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Request error' }));
+    });
   }
 }
 

@@ -51,100 +51,119 @@ export const startAppServer = async (): Promise<AppServerHandle> => {
     });
 
     // Watchlist API endpoints - allows webapp to manage tracked addresses as "bots"
-    app.get('/watchlist', (_req, res) => {
+    // Handler functions for reuse across both /watchlist/* and /api/watchlist/* paths
+    const handleGetWatchlist = (_req: express.Request, res: express.Response) => {
         const addresses = watchlistManager.getAllAddresses();
         const counts = watchlistManager.getCount();
         res.json({
-            ok: true,
-            total: counts.total,
-            active: counts.active,
-            addresses,
+            success: true,
+            data: {
+                addresses,
+                count: counts.total,
+                lastModified: Date.now(),
+            },
         });
-    });
+    };
 
-    app.post('/watchlist/add', (req, res) => {
+    const handleAddAddress = (req: express.Request, res: express.Response) => {
         const { address, alias } = req.body;
 
         if (!address) {
-            res.status(400).json({ ok: false, error: 'Address is required' });
+            res.status(400).json({ success: false, error: 'Address is required' });
             return;
         }
 
-        const success = watchlistManager.addAddress(address, alias);
-        if (success) {
+        const result = watchlistManager.addAddress(address, alias);
+        if (result) {
             res.json({
-                ok: true,
+                success: true,
                 message: `Added address ${alias || address}`,
-                watchlist: watchlistManager.getAllAddresses(),
+                data: watchlistManager.toJSON(),
             });
         } else {
             res.status(400).json({
-                ok: false,
+                success: false,
                 error: 'Failed to add address (invalid format or already exists)',
             });
         }
-    });
+    };
 
-    app.post('/watchlist/remove', (req, res) => {
+    const handleRemoveAddress = (req: express.Request, res: express.Response) => {
         const { address } = req.body;
 
         if (!address) {
-            res.status(400).json({ ok: false, error: 'Address is required' });
+            res.status(400).json({ success: false, error: 'Address is required' });
             return;
         }
 
-        const success = watchlistManager.removeAddress(address);
-        if (success) {
+        const result = watchlistManager.removeAddress(address);
+        if (result) {
             res.json({
-                ok: true,
+                success: true,
                 message: `Removed address ${address}`,
-                watchlist: watchlistManager.getAllAddresses(),
+                data: watchlistManager.toJSON(),
             });
         } else {
-            res.status(404).json({ ok: false, error: 'Address not found in watchlist' });
+            res.status(404).json({ success: false, error: 'Address not found in watchlist' });
         }
-    });
+    };
 
-    app.post('/watchlist/toggle', (req, res) => {
+    const handleToggleAddress = (req: express.Request, res: express.Response) => {
         const { address, enabled } = req.body;
 
         if (!address) {
-            res.status(400).json({ ok: false, error: 'Address is required' });
+            res.status(400).json({ success: false, error: 'Address is required' });
             return;
         }
 
-        const success = watchlistManager.toggleAddress(address, enabled);
-        if (success) {
+        const result = watchlistManager.toggleAddress(address, enabled);
+        if (result) {
             const entry = watchlistManager.getAddress(address);
             res.json({
-                ok: true,
+                success: true,
                 message: `Address ${address} is now ${entry?.enabled ? 'enabled' : 'disabled'}`,
-                watchlist: watchlistManager.getAllAddresses(),
+                data: watchlistManager.toJSON(),
             });
         } else {
-            res.status(404).json({ ok: false, error: 'Address not found in watchlist' });
+            res.status(404).json({ success: false, error: 'Address not found in watchlist' });
         }
-    });
+    };
 
-    app.post('/watchlist/alias', (req, res) => {
+    const handleSetAlias = (req: express.Request, res: express.Response) => {
         const { address, alias } = req.body;
 
         if (!address || !alias) {
-            res.status(400).json({ ok: false, error: 'Address and alias are required' });
+            res.status(400).json({ success: false, error: 'Address and alias are required' });
             return;
         }
 
-        const success = watchlistManager.setAlias(address, alias);
-        if (success) {
+        const result = watchlistManager.setAlias(address, alias);
+        if (result) {
             res.json({
-                ok: true,
+                success: true,
                 message: `Set alias for ${address}: ${alias}`,
-                watchlist: watchlistManager.getAllAddresses(),
+                data: watchlistManager.toJSON(),
             });
         } else {
-            res.status(404).json({ ok: false, error: 'Address not found in watchlist' });
+            res.status(404).json({ success: false, error: 'Address not found in watchlist' });
         }
-    });
+    };
+
+    // Register routes for both /watchlist/* and /api/watchlist/* paths
+    app.get('/watchlist', handleGetWatchlist);
+    app.get('/api/watchlist', handleGetWatchlist);
+
+    app.post('/watchlist/add', handleAddAddress);
+    app.post('/api/watchlist/add', handleAddAddress);
+
+    app.post('/watchlist/remove', handleRemoveAddress);
+    app.post('/api/watchlist/remove', handleRemoveAddress);
+
+    app.post('/watchlist/toggle', handleToggleAddress);
+    app.post('/api/watchlist/toggle', handleToggleAddress);
+
+    app.post('/watchlist/alias', handleSetAlias);
+    app.post('/api/watchlist/alias', handleSetAlias);
 
     app.get('/events', (req, res) => {
         res.setHeader('Content-Type', 'text/event-stream');
@@ -170,7 +189,7 @@ export const startAppServer = async (): Promise<AppServerHandle> => {
         });
     });
 
-    const defaultPort = parseInt(process.env.PORT || '3000', 10);
+    const defaultPort = parseInt(process.env.PORT || '3001', 10);
     const maxRetries = 10;
 
     const tryListen = (port: number, attempt: number): Promise<AppServerHandle> => {

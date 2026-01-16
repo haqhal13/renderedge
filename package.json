@@ -6,7 +6,7 @@
         "help": "ts-node src/scripts/help.ts",
         "setup": "ts-node src/scripts/setup.ts",
         "build": "tsc",
-        "start": "node dist/index.js",
+        "start": "node dist/src/index.js",
         "dev": "ts-node src/index.ts",
         "check-allowance": "ts-node src/scripts/checkAllowance.ts",
         "verify-allowance": "ts-node src/scripts/verifyAllowance.ts",

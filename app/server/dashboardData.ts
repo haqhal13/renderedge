@@ -39,6 +39,15 @@ export class DashboardDataCollector {
   }
 
   /**
+   * Reset dashboard state (called when bot is reset)
+   */
+  reset(): void {
+    this.walletBalance = null;
+    this.walletStartingBalance = null;
+    // Note: paperTrader is not reset here - it will be reset separately if needed
+  }
+
+  /**
    * Refresh on-chain wallet balance for the main wallet
    * Uses PROXY_WALLET if set, otherwise the first USER_ADDRESSES entry.
    */

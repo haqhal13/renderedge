@@ -1,12 +1,13 @@
 import axios from 'axios';
 import { ENV } from '../config/env';
 import Logger from '../utils/logger';
-import { AppStateSnapshot, emitStateSnapshot } from './appState';
+import { AppStateSnapshot, emitStateSnapshot, subscribeToState } from './appState';
 import watchlistManager from './watchlistManager';
 
 const MIN_INTERVAL_MS = parseInt(process.env.WEBAPP_PUSH_INTERVAL_MS || '2000', 10);
 let lastPushedAt = 0;
 let pendingTimer: NodeJS.Timeout | null = null;
+let isInitialized = false;
 
 const formatUsd = (value?: number | null): string | undefined => {
     if (value === undefined || value === null || Number.isNaN(value)) {
@@ -140,6 +141,48 @@ export const publishAppState = (reason: string): void => {
         const debouncedSnapshot = emitStateSnapshot(`${reason}-debounced`);
         void sendPayload(`${reason}-debounced`, debouncedSnapshot);
     }, MIN_INTERVAL_MS - elapsed);
+};
+
+/**
+ * Initialize the web app publisher to automatically push updates
+ * when state changes. Call this once at startup.
+ */
+export const initWebAppPublisher = (): void => {
+    if (isInitialized) {
+        return;
+    }
+
+    if (!ENV.WEBAPP_PUSH_URL) {
+        Logger.info('Web app publisher not configured (no WEBAPP_PUSH_URL)');
+        return;
+    }
+
+    Logger.info(`Web app publisher initialized, pushing to ${ENV.WEBAPP_PUSH_URL}`);
+    isInitialized = true;
+
+    // Subscribe to state changes and push updates
+    subscribeToState((snapshot, reason) => {
+        const now = Date.now();
+        const elapsed = now - lastPushedAt;
+
+        if (elapsed >= MIN_INTERVAL_MS) {
+            void sendPayload(reason, snapshot);
+            return;
+        }
+
+        if (pendingTimer) {
+            return;
+        }
+
+        pendingTimer = setTimeout(() => {
+            const debouncedSnapshot = emitStateSnapshot(`${reason}-debounced`);
+            void sendPayload(`${reason}-debounced`, debouncedSnapshot);
+        }, MIN_INTERVAL_MS - elapsed);
+    });
+
+    // Send initial state
+    const initialSnapshot = emitStateSnapshot('init');
+    void sendPayload('init', initialSnapshot);
 };
 
 export default publishAppState;
