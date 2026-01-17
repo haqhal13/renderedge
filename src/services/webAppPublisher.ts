@@ -1,13 +1,12 @@
 import axios from 'axios';
 import { ENV } from '../config/env';
 import Logger from '../utils/logger';
-import { AppStateSnapshot, emitStateSnapshot, subscribeToState } from './appState';
+import { AppStateSnapshot, emitStateSnapshot } from './appState';
 import watchlistManager from './watchlistManager';
 
 const MIN_INTERVAL_MS = parseInt(process.env.WEBAPP_PUSH_INTERVAL_MS || '2000', 10);
 let lastPushedAt = 0;
 let pendingTimer: NodeJS.Timeout | null = null;
-let isInitialized = false;
 
 const formatUsd = (value?: number | null): string | undefined => {
     if (value === undefined || value === null || Number.isNaN(value)) {
@@ -73,47 +72,8 @@ const mapPortfolio = (snapshot: AppStateSnapshot) => {
     };
 };
 
-const mapPnlHistory = (pnlHistory: AppStateSnapshot['pnlHistory'] = []) =>
-    pnlHistory.map((entry) => ({
-        marketName: entry.marketName,
-        conditionId: entry.conditionId || '',
-        totalPnl: entry.totalPnL,
-        pnlPercent: entry.pnlPercent,
-        outcome: entry.outcome,
-        timestamp: entry.timestamp,
-        marketType: entry.marketType,
-    }));
-
-const mapMarketSummaries = (markets: AppStateSnapshot['marketSummaries'] = []) =>
-    markets.map((m) => ({
-        marketKey: m.marketKey,
-        marketName: m.marketName,
-        category: m.category,
-        endDate: m.endDate,
-        timeRemaining: m.timeRemaining,
-        isExpired: m.isExpired,
-        priceUp: m.priceUp,
-        priceDown: m.priceDown,
-        sharesUp: m.sharesUp,
-        sharesDown: m.sharesDown,
-        investedUp: m.investedUp,
-        investedDown: m.investedDown,
-        currentValueUp: m.currentValueUp,
-        currentValueDown: m.currentValueDown,
-        pnlUp: m.pnlUp,
-        pnlDown: m.pnlDown,
-        pnlUpPercent: m.pnlUpPercent,
-        pnlDownPercent: m.pnlDownPercent,
-        totalPnL: m.totalPnL,
-        totalPnLPercent: m.totalPnLPercent,
-        tradesUp: m.tradesUp,
-        tradesDown: m.tradesDown,
-        upPercent: m.upPercent,
-        downPercent: m.downPercent,
-    }));
-
 const buildPayload = (snapshot: AppStateSnapshot) => ({
-    botName: 'gabagool22',
+    botName: 'EdgeBotPro',
     updatedAt: snapshot.updatedAt,
     myPortfolio: mapPortfolio(snapshot),
     traders: mapTraders(snapshot.traders),
@@ -122,9 +82,6 @@ const buildPayload = (snapshot: AppStateSnapshot) => ({
     health: snapshot.health ?? {},
     watchlist: mapWatchlist(),
     watchlistCount: watchlistManager.getCount(),
-    // Add pnlHistory and marketSummaries for dashboard display
-    pnlHistory: mapPnlHistory(snapshot.pnlHistory),
-    marketSummaries: mapMarketSummaries(snapshot.marketSummaries),
 });
 
 const sendPayload = async (reason: string, snapshot: AppStateSnapshot): Promise<void> => {
@@ -137,7 +94,7 @@ const sendPayload = async (reason: string, snapshot: AppStateSnapshot): Promise<
     pendingTimer = null;
 
     try {
-        const botId = 'gabagool';
+        const botId = 'edgebotpro';
         await axios.post(
             url,
             {
@@ -183,48 +140,6 @@ export const publishAppState = (reason: string): void => {
         const debouncedSnapshot = emitStateSnapshot(`${reason}-debounced`);
         void sendPayload(`${reason}-debounced`, debouncedSnapshot);
     }, MIN_INTERVAL_MS - elapsed);
-};
-
-/**
- * Initialize the web app publisher to automatically push updates
- * when state changes. Call this once at startup.
- */
-export const initWebAppPublisher = (): void => {
-    if (isInitialized) {
-        return;
-    }
-
-    if (!ENV.WEBAPP_PUSH_URL) {
-        Logger.info('Web app publisher not configured (no WEBAPP_PUSH_URL)');
-        return;
-    }
-
-    Logger.info(`Web app publisher initialized, pushing to ${ENV.WEBAPP_PUSH_URL}`);
-    isInitialized = true;
-
-    // Subscribe to state changes and push updates
-    subscribeToState((snapshot, reason) => {
-        const now = Date.now();
-        const elapsed = now - lastPushedAt;
-
-        if (elapsed >= MIN_INTERVAL_MS) {
-            void sendPayload(reason, snapshot);
-            return;
-        }
-
-        if (pendingTimer) {
-            return;
-        }
-
-        pendingTimer = setTimeout(() => {
-            const debouncedSnapshot = emitStateSnapshot(`${reason}-debounced`);
-            void sendPayload(`${reason}-debounced`, debouncedSnapshot);
-        }, MIN_INTERVAL_MS - elapsed);
-    });
-
-    // Send initial state
-    const initialSnapshot = emitStateSnapshot('init');
-    void sendPayload('init', initialSnapshot);
 };
 
 export default publishAppState;

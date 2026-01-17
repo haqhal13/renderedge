@@ -51,119 +51,100 @@ export const startAppServer = async (): Promise<AppServerHandle> => {
     });
 
     // Watchlist API endpoints - allows webapp to manage tracked addresses as "bots"
-    // Handler functions for reuse across both /watchlist/* and /api/watchlist/* paths
-    const handleGetWatchlist = (_req: express.Request, res: express.Response) => {
+    app.get('/watchlist', (_req, res) => {
         const addresses = watchlistManager.getAllAddresses();
         const counts = watchlistManager.getCount();
         res.json({
-            success: true,
-            data: {
-                addresses,
-                count: counts.total,
-                lastModified: Date.now(),
-            },
+            ok: true,
+            total: counts.total,
+            active: counts.active,
+            addresses,
         });
-    };
+    });
 
-    const handleAddAddress = (req: express.Request, res: express.Response) => {
+    app.post('/watchlist/add', (req, res) => {
         const { address, alias } = req.body;
 
         if (!address) {
-            res.status(400).json({ success: false, error: 'Address is required' });
+            res.status(400).json({ ok: false, error: 'Address is required' });
             return;
         }
 
-        const result = watchlistManager.addAddress(address, alias);
-        if (result) {
+        const success = watchlistManager.addAddress(address, alias);
+        if (success) {
             res.json({
-                success: true,
+                ok: true,
                 message: `Added address ${alias || address}`,
-                data: watchlistManager.toJSON(),
+                watchlist: watchlistManager.getAllAddresses(),
             });
         } else {
             res.status(400).json({
-                success: false,
+                ok: false,
                 error: 'Failed to add address (invalid format or already exists)',
             });
         }
-    };
+    });
 
-    const handleRemoveAddress = (req: express.Request, res: express.Response) => {
+    app.post('/watchlist/remove', (req, res) => {
         const { address } = req.body;
 
         if (!address) {
-            res.status(400).json({ success: false, error: 'Address is required' });
+            res.status(400).json({ ok: false, error: 'Address is required' });
             return;
         }
 
-        const result = watchlistManager.removeAddress(address);
-        if (result) {
+        const success = watchlistManager.removeAddress(address);
+        if (success) {
             res.json({
-                success: true,
+                ok: true,
                 message: `Removed address ${address}`,
-                data: watchlistManager.toJSON(),
+                watchlist: watchlistManager.getAllAddresses(),
             });
         } else {
-            res.status(404).json({ success: false, error: 'Address not found in watchlist' });
+            res.status(404).json({ ok: false, error: 'Address not found in watchlist' });
         }
-    };
+    });
 
-    const handleToggleAddress = (req: express.Request, res: express.Response) => {
+    app.post('/watchlist/toggle', (req, res) => {
         const { address, enabled } = req.body;
 
         if (!address) {
-            res.status(400).json({ success: false, error: 'Address is required' });
+            res.status(400).json({ ok: false, error: 'Address is required' });
             return;
         }
 
-        const result = watchlistManager.toggleAddress(address, enabled);
-        if (result) {
+        const success = watchlistManager.toggleAddress(address, enabled);
+        if (success) {
             const entry = watchlistManager.getAddress(address);
             res.json({
-                success: true,
+                ok: true,
                 message: `Address ${address} is now ${entry?.enabled ? 'enabled' : 'disabled'}`,
-                data: watchlistManager.toJSON(),
+                watchlist: watchlistManager.getAllAddresses(),
             });
         } else {
-            res.status(404).json({ success: false, error: 'Address not found in watchlist' });
+            res.status(404).json({ ok: false, error: 'Address not found in watchlist' });
         }
-    };
+    });
 
-    const handleSetAlias = (req: express.Request, res: express.Response) => {
+    app.post('/watchlist/alias', (req, res) => {
         const { address, alias } = req.body;
 
         if (!address || !alias) {
-            res.status(400).json({ success: false, error: 'Address and alias are required' });
+            res.status(400).json({ ok: false, error: 'Address and alias are required' });
             return;
         }
 
-        const result = watchlistManager.setAlias(address, alias);
-        if (result) {
+        const success = watchlistManager.setAlias(address, alias);
+        if (success) {
             res.json({
-                success: true,
+                ok: true,
                 message: `Set alias for ${address}: ${alias}`,
-                data: watchlistManager.toJSON(),
+                watchlist: watchlistManager.getAllAddresses(),
             });
         } else {
-            res.status(404).json({ success: false, error: 'Address not found in watchlist' });
+            res.status(404).json({ ok: false, error: 'Address not found in watchlist' });
         }
-    };
-
-    // Register routes for both /watchlist/* and /api/watchlist/* paths
-    app.get('/watchlist', handleGetWatchlist);
-    app.get('/api/watchlist', handleGetWatchlist);
-
-    app.post('/watchlist/add', handleAddAddress);
-    app.post('/api/watchlist/add', handleAddAddress);
-
-    app.post('/watchlist/remove', handleRemoveAddress);
-    app.post('/api/watchlist/remove', handleRemoveAddress);
-
-    app.post('/watchlist/toggle', handleToggleAddress);
-    app.post('/api/watchlist/toggle', handleToggleAddress);
-
-    app.post('/watchlist/alias', handleSetAlias);
-    app.post('/api/watchlist/alias', handleSetAlias);
+    });
 
     app.get('/events', (req, res) => {
         res.setHeader('Content-Type', 'text/event-stream');
@@ -189,48 +170,32 @@ export const startAppServer = async (): Promise<AppServerHandle> => {
         });
     });
 
-    const defaultPort = parseInt(process.env.PORT || '3001', 10);
-    const maxRetries = 10;
+    const port = 3001;
 
-    const tryListen = (port: number, attempt: number): Promise<AppServerHandle> => {
-        return new Promise((resolve, reject) => {
-            const server = app.listen(port);
+    return new Promise((resolve, reject) => {
+        const server = app.listen(port);
 
-            server.on('listening', () => {
-                Logger.success(`Web API listening on port ${port}`);
-                resolve({
-                    port,
-                    stop: () =>
-                        new Promise<void>((resolveClose, rejectClose) => {
-                            server.close((error) => {
-                                if (error) {
-                                    rejectClose(error);
-                                } else {
-                                    resolveClose();
-                                }
-                            });
-                        }),
-                });
-            });
-
-            server.on('error', (error: NodeJS.ErrnoException) => {
-                if (error.code === 'EADDRINUSE') {
-                    server.close();
-                    if (attempt < maxRetries) {
-                        const nextPort = port + 1;
-                        Logger.warning(`Port ${port} in use, trying ${nextPort}...`);
-                        resolve(tryListen(nextPort, attempt + 1));
-                    } else {
-                        reject(new Error(`Could not find available port after ${maxRetries} attempts`));
-                    }
-                } else {
-                    reject(error);
-                }
+        server.on('listening', () => {
+            Logger.success(`Web API listening on port ${port}`);
+            resolve({
+                port,
+                stop: () =>
+                    new Promise<void>((resolveClose, rejectClose) => {
+                        server.close((error) => {
+                            if (error) {
+                                rejectClose(error);
+                            } else {
+                                resolveClose();
+                            }
+                        });
+                    }),
             });
         });
-    };
 
-    return tryListen(defaultPort, 1);
+        server.on('error', (error: NodeJS.ErrnoException) => {
+            reject(error);
+        });
+    });
 };
 
 export default startAppServer;

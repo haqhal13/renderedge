@@ -966,12 +966,14 @@ export const main = async () => {
                             currentMarkets,
                         };
 
-                        const metricsUrl =
-                            process.env.BOT_METRICS_URL || 'http://localhost:3000/api/bot';
+                        const metricsUrl = process.env.BOT_METRICS_URL;
 
-                        await axios.post(metricsUrl, payload, {
-                            headers: { 'Content-Type': 'application/json' },
-                        });
+                        // Only send metrics if BOT_METRICS_URL is explicitly configured
+                        if (metricsUrl) {
+                            await axios.post(metricsUrl, payload, {
+                                headers: { 'Content-Type': 'application/json' },
+                            });
+                        }
                     } catch (err) {
                         Logger.warning(
                             `Failed to send watcher metrics to dashboard: ${
