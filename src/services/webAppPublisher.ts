@@ -72,6 +72,45 @@ const mapPortfolio = (snapshot: AppStateSnapshot) => {
     };
 };
 
+const mapPnlHistory = (pnlHistory: AppStateSnapshot['pnlHistory'] = []) =>
+    pnlHistory.map((entry) => ({
+        marketName: entry.marketName,
+        conditionId: entry.conditionId || '',
+        totalPnl: entry.totalPnL,
+        pnlPercent: entry.pnlPercent,
+        outcome: entry.outcome,
+        timestamp: entry.timestamp,
+        marketType: entry.marketType,
+    }));
+
+const mapMarketSummaries = (markets: AppStateSnapshot['marketSummaries'] = []) =>
+    markets.map((m) => ({
+        marketKey: m.marketKey,
+        marketName: m.marketName,
+        category: m.category,
+        endDate: m.endDate,
+        timeRemaining: m.timeRemaining,
+        isExpired: m.isExpired,
+        priceUp: m.priceUp,
+        priceDown: m.priceDown,
+        sharesUp: m.sharesUp,
+        sharesDown: m.sharesDown,
+        investedUp: m.investedUp,
+        investedDown: m.investedDown,
+        currentValueUp: m.currentValueUp,
+        currentValueDown: m.currentValueDown,
+        pnlUp: m.pnlUp,
+        pnlDown: m.pnlDown,
+        pnlUpPercent: m.pnlUpPercent,
+        pnlDownPercent: m.pnlDownPercent,
+        totalPnL: m.totalPnL,
+        totalPnLPercent: m.totalPnLPercent,
+        tradesUp: m.tradesUp,
+        tradesDown: m.tradesDown,
+        upPercent: m.upPercent,
+        downPercent: m.downPercent,
+    }));
+
 const buildPayload = (snapshot: AppStateSnapshot) => ({
     botName: 'EdgeBotPro',
     updatedAt: snapshot.updatedAt,
@@ -82,6 +121,8 @@ const buildPayload = (snapshot: AppStateSnapshot) => ({
     health: snapshot.health ?? {},
     watchlist: mapWatchlist(),
     watchlistCount: watchlistManager.getCount(),
+    pnlHistory: mapPnlHistory(snapshot.pnlHistory),
+    marketSummaries: mapMarketSummaries(snapshot.marketSummaries),
 });
 
 const sendPayload = async (reason: string, snapshot: AppStateSnapshot): Promise<void> => {
@@ -140,6 +181,30 @@ export const publishAppState = (reason: string): void => {
         const debouncedSnapshot = emitStateSnapshot(`${reason}-debounced`);
         void sendPayload(`${reason}-debounced`, debouncedSnapshot);
     }, MIN_INTERVAL_MS - elapsed);
+};
+
+let isInitialized = false;
+
+/**
+ * Initialize the web app publisher to automatically push updates
+ * when state changes. Call this once at startup.
+ */
+export const initWebAppPublisher = (): void => {
+    if (isInitialized) {
+        return;
+    }
+
+    if (!ENV.WEBAPP_PUSH_URL) {
+        Logger.info('Web app publisher not configured (no WEBAPP_PUSH_URL)');
+        return;
+    }
+
+    Logger.info(`Web app publisher initialized, pushing to ${ENV.WEBAPP_PUSH_URL}`);
+    isInitialized = true;
+
+    // Send initial state
+    const initialSnapshot = emitStateSnapshot('init');
+    void sendPayload('init', initialSnapshot);
 };
 
 export default publishAppState;
