@@ -457,8 +457,8 @@ export const main = async () => {
 
                         setPnlHistory(pnlHistoryForAppState);
 
-                        const botId = 'gabagool';
-                        const botName = 'gabagool22';
+                        const botId = 'edgebotpro';
+                        const botName = 'EdgeBotPro';
                         const payload = {
                             botId,
                             botName,
@@ -895,8 +895,8 @@ export const main = async () => {
                         setMarketSummaries(marketSummariesForAppState);
                         setPnlHistory(pnlHistoryForAppState);
 
-                        const botId = 'gabagool';
-                        const botName = 'gabagool22';
+                        const botId = 'edgebotpro';
+                        const botName = 'EdgeBotPro';
                         const payload = {
                             botId,
                             botName,

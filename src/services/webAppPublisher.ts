@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { ENV } from '../config/env';
 import Logger from '../utils/logger';
-import { AppStateSnapshot, emitStateSnapshot } from './appState';
+import { AppStateSnapshot, emitStateSnapshot, subscribeToState } from './appState';
 import watchlistManager from './watchlistManager';
 
 const MIN_INTERVAL_MS = parseInt(process.env.WEBAPP_PUSH_INTERVAL_MS || '2000', 10);
@@ -205,6 +205,11 @@ export const initWebAppPublisher = (): void => {
     // Send initial state
     const initialSnapshot = emitStateSnapshot('init');
     void sendPayload('init', initialSnapshot);
+
+    // Subscribe to state changes and publish updates automatically
+    subscribeToState((snapshot, reason) => {
+        publishAppState(reason);
+    });
 };
 
 export default publishAppState;
