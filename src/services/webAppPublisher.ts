@@ -113,6 +113,7 @@ const mapMarketSummaries = (markets: AppStateSnapshot['marketSummaries'] = []) =
 
 const buildPayload = (snapshot: AppStateSnapshot) => ({
     botName: 'EdgeBotPro',
+    version: 'v2-pnlfix',
     updatedAt: snapshot.updatedAt,
     myPortfolio: mapPortfolio(snapshot),
     traders: mapTraders(snapshot.traders),
